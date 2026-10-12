@@ -269,6 +269,8 @@ A finding means "look before you install", not "this is malware". Open the packa
 
 No finding does not mean that a package is safe. `SLOP002` finds names that were registered recently, or registered once and left. An attacker who publishes two releases and waits a month is not reported. Neither is a package whose file list is longer than 512 KB.
 
+The age of a package is the age of its oldest file that is still on PyPI. So an older package whose owner deletes old files looks new: one that only keeps its latest release, or its last few nightly builds. If you depend on such a package, add it to `known-packages` or ignore its line.
+
 To stay quiet, `SLOP002` never reports:
 
 - a package whose oldest file is a year old or more (unless PyPI has quarantined it),
