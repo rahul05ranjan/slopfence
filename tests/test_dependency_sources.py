@@ -1501,6 +1501,30 @@ def test_an_easy_install_index_that_is_pypi_changes_nothing(write, check):
         assert registry.queries == ["ghost-lib"]
 
 
+@pytest.mark.parametrize("links", ["[]", "()", "''", "None"])
+def test_empty_dependency_links_name_no_source(write, check, not_installed, links):
+    """``dependency_links=[]`` is what a project template leaves behind. It holds no
+    link, so the file's packages are looked up, and imports too."""
+    write(
+        "setup.py",
+        "from setuptools import setup\n"
+        f"setup(name='demo', install_requires=['ghost-a'], dependency_links={links})\n",
+    )
+    write("app.py", "import ghost_mod_zz\n")
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert [f.subject for f in result.findings] == ["ghost_mod_zz", "ghost-a"]
+    assert result.notes == []
+
+
+@pytest.mark.parametrize("links", ["LINKS", "find_links()", "[url]", "['']", "[] + extra"])
+def test_dependency_links_that_may_hold_a_link_name_a_source(write, check, links):
+    """Anything but a literal that is certainly empty may hold a link."""
+    write("setup.py", f"from setuptools import setup\nsetup(dependency_links={links})\n")
+    write("setup.cfg", "[options]\ninstall_requires = corp-auth\n")
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+
+
 def test_lock_files_are_only_read_for_what_the_run_needs(write, check, monkeypatch):
     """Without ``check_imports`` nobody asks for the names in a lock file. Only
     ``Pipfile.lock`` is read then, because it can name an index."""

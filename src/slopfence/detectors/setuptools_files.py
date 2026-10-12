@@ -204,6 +204,13 @@ def _string(node: ast.AST) -> ast.Constant | None:
     return node if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
+def _is_empty(node: ast.expr) -> bool:
+    """Whether ``node`` is written out as nothing: ``[]``, ``()``, ``""`` or ``None``."""
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return not node.elts
+    return isinstance(node, ast.Constant) and not node.value
+
+
 def _summands(node: ast.expr) -> list[ast.expr]:
     """The operands of ``a + b + c``, in order, however long the sum is."""
     right: list[ast.expr] = []
@@ -470,7 +477,8 @@ def parse_setup_py(src: SourceFile) -> DependencyFile:
         for value in script.keyword_values(call, "name"):
             found.project_names.update(literal.value for literal in script.strings(value))
         # dependency_links (even computed ones) mean packages may come from elsewhere.
-        private = bool(script.keyword_values(call, LINKS_KEY))
+        # An empty list, as a project template leaves it, holds no link.
+        private = not all(_is_empty(value) for value in script.keyword_values(call, LINKS_KEY))
         found.private_index = found.private_index or private
         literals: list[ast.Constant] = []
         for keyword in REQUIRES_KEYS:
