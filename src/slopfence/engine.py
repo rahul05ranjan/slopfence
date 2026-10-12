@@ -139,10 +139,14 @@ class Result:
     unchecked_rules: list[str] = field(default_factory=list)
 
 
-def _listed(files: Sequence[str], limit: int = 3) -> str:
-    """File names for a note: at most ``limit`` of them, then how many more there are."""
-    shown = ", ".join(files[:limit])
-    more = len(files) - limit
+# How many file names a note lists before it only counts the rest.
+NOTE_FILE_LIMIT = 3
+
+
+def _listed(files: Sequence[str]) -> str:
+    """File names for a note: the first few, then how many more there are."""
+    shown = ", ".join(files[:NOTE_FILE_LIMIT])
+    more = len(files) - NOTE_FILE_LIMIT
     return f"{shown} and {plural(more, 'more file')}" if more > 0 else shown
 
 
