@@ -1,4 +1,4 @@
-"""What every dependency parser shares (SLOP001).
+"""What every dependency parser shares (SLOP001, SLOP002).
 
 * ``kind_of`` decides, from a file's name and folder, whether it declares
   dependencies and which parser reads it.
@@ -18,6 +18,7 @@ from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath
 from typing import NamedTuple
 
+from slopfence.models import RULES
 from slopfence.source import IGNORE_RE
 
 
@@ -65,6 +66,8 @@ OTHER_PACKAGE_MANAGERS = frozenset(
 # Text files of other tools that a folder named "requirements" may hold.
 NOT_REQUIREMENTS = frozenset({"CMakeLists.txt"})
 _WORDS = re.compile(r"[a-z]+")
+# What an ignore directive that names no rule switches off, and an ``ignore-file`` too.
+ALL_RULES = frozenset(RULES)
 
 _OPERATOR = r"(?:===|==|~=|!=|<=|>=|<|>)"
 # A PEP 508 requirement: a name, optional extras, then nothing, a version specifier
@@ -121,14 +124,23 @@ class Dependency:
     line: int
     # False for packages that don't come from PyPI (URLs, paths, git, private indexes).
     validate: bool = True
-    # True when an ignore directive covers SLOP001 on this line or file.
-    suppressed: bool = False
+    # The rules that an ignore directive switches off for this dependency: the ones it
+    # names, or all of them for one that names none and for an ``ignore-file``.
+    ignored: frozenset[str] = frozenset()
     # 1-based column of the requirement. Files with one requirement per line report 1.
     col: int = 1
     # True when the entry itself says where the package comes from: a URL, a path, git,
     # or a package source that it picks by name. That holds for the package, not just
     # for this entry: see ``ProjectIndex.sourced_names``.
     own_source: bool = False
+
+    @property
+    def suppressed(self) -> bool:
+        """Whether an ignore directive covers SLOP001 here.
+
+        The name is then never looked up, so SLOP002 can't report it either.
+        """
+        return "SLOP001" in self.ignored
 
 
 @dataclass
@@ -146,10 +158,22 @@ class DependencyFile:
     # marker, an option). Such a file may be a list for another tool.
     plain_list: bool = False
     # Notebooks only: (top-level module, line, column) of every import in a code cell.
-    # Empty unless they were asked for.
+    # Empty unless they were asked for. An import under an ignore comment that covers
+    # SLOP001 is left out: it is never looked up.
     imports: list[tuple[str, int, int]] = field(default_factory=list)
+    # Notebooks only: the rules that an ignore comment switches off for the imports on
+    # a line of the file. Only lines that have an import in ``imports`` are listed.
+    ignores: dict[int, frozenset[str]] = field(default_factory=dict)
     # Notebooks only: the file is too large to be read (see ``notebooks.MAX_BYTES``).
     too_large: bool = False
+
+    def is_ignored(self, rule: str, line: int) -> bool:
+        """Whether an ignore comment covers ``rule`` for the imports on ``line`` (notebooks).
+
+        A notebook that is written as one line of JSON has all its imports on that
+        line. A comment for one of them then covers them all.
+        """
+        return rule in self.ignores.get(line, ())
 
     def make_private(self) -> None:
         """Record that the file's packages may come from another place than PyPI: none
@@ -314,13 +338,19 @@ def egg_name(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-def suppresses_slop001(comment: str) -> bool:
-    """Whether a comment holds a ``slopfence: ignore`` directive that covers SLOP001."""
+def line_ignores(comment: str) -> frozenset[str]:
+    """The rules that a ``slopfence: ignore`` directive in a comment switches off.
+
+    The ones it names, or every rule when it names none. Empty when the comment holds
+    no directive. Every dependency parser reads its comments with this.
+    """
     m = IGNORE_RE.search(comment)
     if not m:
-        return False
+        return frozenset()
     rules = m.group("rules")
-    return rules is None or "SLOP001" in {r.strip().upper() for r in rules.split(",")}
+    if rules is None:
+        return ALL_RULES
+    return frozenset(rule.strip().upper() for rule in rules.split(",") if rule.strip())
 
 
 def requirements_comment(line: str) -> str:

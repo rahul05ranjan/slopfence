@@ -23,11 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
+    ALL_RULES,
     Dependency,
     DependencyFile,
     Kind,
+    line_ignores,
     requirements_comment,
-    suppresses_slop001,
 )
 from slopfence.detectors.pip_commands import (
     PipInstall,
@@ -277,8 +278,8 @@ class CellView:
     commands: list[tuple[int, int]] = field(default_factory=list)
     # Imports as (top-level module, line number in the cell, 0-based character column).
     imports: list[tuple[str, int, int]] = field(default_factory=list)
-    # The lines of the cell (1-based) with an ignore comment that covers SLOP001.
-    ignored: set[int] = field(default_factory=set)
+    # The rules that an ignore comment switches off, by line of the cell (1-based).
+    ignores: dict[int, frozenset[str]] = field(default_factory=dict)
     # The modules the cell writes: ``%%writefile pkg/mod.py`` gives ``pkg`` and ``mod``.
     written: set[str] = field(default_factory=set)
 
@@ -370,7 +371,7 @@ def view_cell(text: str, want_imports: bool) -> CellView:
             for line in range(node.lineno, node.end_lineno or node.lineno)
         }
         view.commands = [(offset, n) for offset, n in commands if n not in in_strings]
-    view.ignored = {c.line for c in src.comments if suppresses_slop001(c.text)}
+    view.ignores = {c.line: off for c in src.comments if (off := line_ignores(c.text))}
     if want_imports:
         for name, lineno, byte_col in top_level_imports(src):
             line = lines[lineno - 1] if lineno <= len(lines) else ""
@@ -396,14 +397,14 @@ def _offset(lines: list[str], lineno: int, col: int) -> int:
     return sum(len(line) + 1 for line in lines[: lineno - 1]) + col
 
 
-def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool]]:
+def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, frozenset[str]]]:
     """Every ``pip install`` command of a cell.
 
-    Yields what the command says, and whether an ignore comment covers it. The
-    comment may be at the end of the command, which is the end of its last line
-    when it goes on over several. Or it is on a comment-only line right above the
-    command: on Windows a shell line passes ``# ...`` on to pip, so there the
-    comment can't share the line.
+    Yields what the command says, and the rules that an ignore comment switches off
+    for it. The comment may be at the end of the command, which is the end of its
+    last line when it goes on over several. Or it is on a comment-only line right
+    above the command: on Windows a shell line passes ``# ...`` on to pip, so there
+    the comment can't share the line.
     """
     lines = cell.text.split("\n")
     for offset, n in view.commands:
@@ -412,9 +413,9 @@ def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool]]:
         commands, end = shell_commands(cell.text, offset)
         last_line = cell.text[cell.text.rfind("\n", 0, end) + 1 : end]
         above = lines[n - 1].strip() if n else ""
-        ignored = suppresses_slop001(requirements_comment(last_line)) or (
-            above.startswith("#") and suppresses_slop001(above)
-        )
+        ignored = line_ignores(requirements_comment(last_line))
+        if above.startswith("#"):
+            ignored |= line_ignores(above)
         for words in commands:
             if arguments := pip_install_arguments(words):
                 yield pip_requirements(arguments), ignored
@@ -476,7 +477,7 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
                             rel,
                             line,
                             validate=not (sourced or install.variables),
-                            suppressed=ignored,
+                            ignored=ignored,
                             col=col,
                             own_source=sourced,
                         )
@@ -484,15 +485,20 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
             lines = cell.text.split("\n")
             for name, lineno, col in view.imports:
                 at = _offset(lines, lineno, col)
+                off = view.ignores.get(lineno, frozenset())
                 # Unusual line breaks: never report at a wrong place.
-                if lineno not in view.ignored and cell.text.startswith(("import", "from"), at):
-                    found.imports.append((name, *notebook.position(cell, at)))
+                if "SLOP001" not in off and cell.text.startswith(("import", "from"), at):
+                    line, column = notebook.position(cell, at)
+                    found.imports.append((name, line, column))
+                    if off:
+                        found.ignores[line] = found.ignores.get(line, frozenset()) | off
         if _mentions_an_index(cell.text, understood):
             found.private_index = True
     private = found.private_index or links
     for dep in found.dependencies:
         dep.validate = dep.validate and not private
-        dep.suppressed = dep.suppressed or ignore_file
+        if ignore_file:
+            dep.ignored = ALL_RULES
     if private or ignore_file or unnamed:
         found.imports = []
     found.imports = [entry for entry in found.imports if entry[0] not in written]

@@ -1,4 +1,9 @@
-"""SLOP001: dependencies and imports that do not exist on PyPI.
+"""SLOP001 and SLOP002: dependencies and imports that PyPI lacks, or has only just got.
+
+SLOP001 reports a name that does not exist on PyPI. SLOP002 reports one that exists
+but is too new to trust without a look (see ``squatting``). SLOP002 reads the
+answers to SLOP001's lookups: it never causes a lookup of a name that SLOP001 would
+not send.
 
 Two checks:
 
@@ -28,11 +33,12 @@ import importlib.util
 import json
 import re
 import sys
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
+    ALL_RULES,
     MARKER_NAMES,
     REQ_COMMENT,
     Dependency,
@@ -41,17 +47,18 @@ from slopfence.detectors.dependency import (
     egg_name,
     is_package_name,
     kind_of,
+    line_ignores,
     lists_other_packages,
     parse_requirement,
     requirements_comment,
-    suppresses_slop001,
 )
 from slopfence.detectors.import_names import IMPORT_NAMES, provides
 from slopfence.detectors.notebooks import MAX_BYTES, scan_notebook
 from slopfence.detectors.setuptools_files import parse_setup_cfg, parse_setup_py
+from slopfence.detectors.squatting import Risk, assess
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
-from slopfence.models import Finding
-from slopfence.registry import BatchRegistry, OfflineRegistry, Registry, normalize
+from slopfence.models import NEW_PACKAGE_DAYS, Finding
+from slopfence.registry import BatchRegistry, FactsRegistry, OfflineRegistry, Registry, normalize
 from slopfence.source import IGNORE_FILE_RE, load, read_source
 from slopfence.source import relative_path as _rel
 
@@ -102,9 +109,22 @@ _BYTE_ORDER_MARKS = (
     (codecs.BOM_UTF16_LE, "utf-16-le"),
 )
 # The rules whose findings depend on answers from PyPI. A run that got no answer finds
-# nothing for them, and that must never be read as "fixed". SLOP002 (#39) is named
-# before it exists, so that the two rules can never get two lists.
+# nothing for them, and that must never be read as "fixed".
 PACKAGE_RULES = frozenset({"SLOP001", "SLOP002"})
+
+
+def may_look_up(is_off: Callable[[str], bool], rules: Collection[str]) -> bool:
+    """Whether names may be sent to PyPI from a place where some rules are switched off.
+
+    ``is_off`` says whether a rule is switched off there: by an ignore comment for a
+    line, or by ``per-file-ignores`` for a file. ``rules`` are the package rules that
+    run.
+
+    The lookups are SLOP001's. Where it is switched off nothing is sent, whatever
+    else runs: that is what ignoring SLOP001 has meant since v0.2. Nor is anything
+    sent where no rule that runs could report the answer.
+    """
+    return not is_off("SLOP001") and not all(is_off(rule) for rule in rules)
 
 
 @dataclass
@@ -342,7 +362,7 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
         comments = toml_comments(text)
     if any(IGNORE_FILE_RE.search(c) for c in comments):
         for dep in found.dependencies:
-            dep.suppressed = True
+            dep.ignored = ALL_RULES
     return found
 
 
@@ -400,7 +420,7 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     # Whether any line uses pip's own syntax: an option, a URL, a version, an extra.
     pip_syntax = False
     for lineno, raw in enumerate(lines, start=1):
-        suppressed = suppresses_slop001(requirements_comment(raw))
+        ignored = line_ignores(requirements_comment(raw))
         line = REQ_COMMENT.sub("", raw).strip()
         if not line:
             continue
@@ -409,9 +429,7 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
             # Options and bare URLs/paths: the name is only known from #egg=.
             if name := egg_name(line):
                 deps.append(
-                    Dependency(
-                        name, rel, lineno, validate=False, suppressed=suppressed, own_source=True
-                    )
+                    Dependency(name, rel, lineno, validate=False, ignored=ignored, own_source=True)
                 )
             continue
         spec = _LINE_OPTIONS.sub("", line.rstrip("\\").rstrip())
@@ -428,7 +446,7 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
                 rel,
                 lineno,
                 validate=not (parsed.direct or private_index or links),
-                suppressed=suppressed,
+                ignored=ignored,
                 own_source=parsed.direct,
             )
         )
@@ -510,9 +528,10 @@ class _LineFinder:
             table, re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
         )
 
-    def suppressed(self, line: int) -> bool:
-        """Whether an ignore comment on a line (1-based) covers SLOP001."""
-        return 0 < line <= len(self.comments) and suppresses_slop001(self.comments[line - 1])
+    def ignored(self, line: int) -> frozenset[str]:
+        """The rules that an ignore comment on a line (1-based) switches off."""
+        on_line = self.comments[line - 1] if 0 < line <= len(self.comments) else ""
+        return line_ignores(on_line)
 
 
 def _load_toml(text: str) -> dict | None:
@@ -566,9 +585,7 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
         line = finder.spec(table, array, spec)
         sourced = "://" in spec or normalize(name) in uv_sources
         validate = not (private_index or sourced)
-        deps.append(
-            Dependency(name, rel, line, validate, finder.suppressed(line), own_source=sourced)
-        )
+        deps.append(Dependency(name, rel, line, validate, finder.ignored(line), own_source=sourced))
 
     for spec in _array(project.get("dependencies")):
         add_spec("project", "dependencies", spec)
@@ -607,7 +624,7 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
             line = finder.key(table, name)
             validate = not (external or private_index) and is_package_name(name)
             deps.append(
-                Dependency(name, rel, line, validate, finder.suppressed(line), own_source=external)
+                Dependency(name, rel, line, validate, finder.ignored(line), own_source=external)
             )
     return found
 
@@ -655,7 +672,7 @@ def _parse_pipfile(text: str, rel: str) -> DependencyFile:
                     rel,
                     line,
                     validate=from_index and not private and is_package_name(name),
-                    suppressed=finder.suppressed(line),
+                    ignored=finder.ignored(line),
                     own_source=not from_index,
                 )
             )
@@ -683,7 +700,10 @@ _FileDependencies = tuple[DependencyFile, list[Dependency]]
 
 
 class PackageChecker:
-    """Looks up dependencies and imports on PyPI and reports the ones that don't exist."""
+    """Looks up dependencies and imports on PyPI, for both package rules.
+
+    SLOP001 reports the ones that don't exist, and SLOP002 the ones that are new.
+    """
 
     def __init__(
         self,
@@ -692,15 +712,26 @@ class PackageChecker:
         known_packages: Iterable[str] = (),
         private_index: str | None = None,
         inherited_from: Iterable[str] = (),
+        *,
+        now: float,
+        rules: Iterable[str] = PACKAGE_RULES,
+        min_package_age: int = NEW_PACKAGE_DAYS,
     ) -> None:
         """``private_index`` says where the environment configures a non-PyPI index, if anywhere.
 
         ``inherited_from`` are the project files whose private index also covers the
         dependency files that name no index themselves (see
         ``DependencyFile.inherits_index``). Empty when that is switched off.
+
+        ``rules`` are the package rules that report. ``now`` (Unix seconds) is the
+        time SLOP002 counts a package's age from, and ``min_package_age`` the days a
+        package must have been on PyPI.
         """
         self.index = index
         self.registry = registry
+        self._rules = PACKAGE_RULES & frozenset(rules)
+        self._now = now
+        self._min_age = min_package_age
         # Private/internal packages the user vouches for; globs allowed ("corp-*").
         self._known = [normalize(p) for p in known_packages]
         # Where the environment configures a non-PyPI index (pip.conf, PIP_INDEX_URL...).
@@ -710,7 +741,8 @@ class PackageChecker:
         self._not_from_pypi = index.own_names | index.sourced_names
         self._installed = _installed_modules()
         self._provided_by = index.declared | index.locked
-        self._missing: dict[str, bool] = {}
+        # Import name -> whether PyPI has a package for it (None: no answer, or not asked).
+        self._on_pypi: dict[str, bool | None] = {}
         # Import name -> the names to ask PyPI about ([] when it needs no lookup).
         self._candidates: dict[str, list[str]] = {}
         # Whether the registry had no answer for a name it was asked about.
@@ -735,13 +767,14 @@ class PackageChecker:
     def _may_be_public(self, dep: Dependency) -> bool:
         """Whether a declared dependency, by itself, is one PyPI can be asked about.
 
-        Not one from a URL, a path or a private index, not one with an ignore
-        comment, not a known package, not a package of the project's own, and not
-        one that another file takes from a place of its own.
+        Not one from a URL, a path or a private index, not one whose ignore comment
+        keeps it from being looked up (see ``may_look_up``), not a known package,
+        not a package of the project's own, and not one that another file takes from
+        a place of its own.
         """
         return (
             dep.validate
-            and not dep.suppressed
+            and may_look_up(dep.ignored.__contains__, self._rules)
             and not self._is_known(dep.name)
             and normalize(dep.name) not in self._not_from_pypi
         )
@@ -843,8 +876,17 @@ class PackageChecker:
             not self._is_provided(name) for name in imports
         )
 
+    def _risk(self, name: str) -> Risk | None:
+        """Why the package ``name``, which PyPI has, is risky (SLOP002). None if it is not.
+
+        None too when SLOP002 does not run, or when the registry has no facts.
+        """
+        if "SLOP002" not in self._rules or not isinstance(self.registry, FactsRegistry):
+            return None
+        return assess(self.registry.info(name), self._now, self._min_age)
+
     def check_dependencies(self, only_paths: set[str] | None = None) -> Iterator[Finding]:
-        """Report declared dependencies that don't exist on PyPI.
+        """Report declared dependencies that don't exist on PyPI, and ones that are new there.
 
         Nothing is reported for a file that may be a list for another tool (see
         ``DependencyFile.may_be_for_another_tool``) when PyPI has fewer of its names
@@ -855,19 +897,28 @@ class PackageChecker:
         """
         for file, deps in self._lookup_dependencies(only_paths):
             answers = [self._exists(dep.name) for dep in deps]
-            missing = [dep for dep, found in zip(deps, answers, strict=True) if found is False]
             not_found = len(answers) - answers.count(True)
             if file.may_be_for_another_tool and not_found > answers.count(True):
                 continue
-            for dep in missing:
-                yield Finding(
-                    "SLOP001",
-                    dep.path,
-                    dep.line,
-                    dep.col,
-                    f"Dependency '{dep.name}' does not exist on PyPI (possible hallucination)",
-                    subject=normalize(dep.name),
-                )
+            for dep, found in zip(deps, answers, strict=True):
+                if found is False and "SLOP001" in self._rules:
+                    yield Finding(
+                        "SLOP001",
+                        dep.path,
+                        dep.line,
+                        dep.col,
+                        f"Dependency '{dep.name}' does not exist on PyPI (possible hallucination)",
+                        subject=normalize(dep.name),
+                    )
+                elif found and "SLOP002" not in dep.ignored and (risk := self._risk(dep.name)):
+                    yield Finding(
+                        "SLOP002",
+                        dep.path,
+                        dep.line,
+                        dep.col,
+                        f"Dependency '{dep.name}' {risk.text}",
+                        subject=risk.subject(normalize(dep.name)),
+                    )
 
     def _is_known(self, name: str) -> bool:
         key = normalize(name)
@@ -890,21 +941,30 @@ class PackageChecker:
         """Whether an import needs a PyPI lookup: nothing local, installed or declared has it."""
         return not (self._is_provided(name) or _is_installed(name, self._installed))
 
-    def _is_missing(self, name: str) -> bool:
-        """Cached per name; every import occurrence is still reported separately."""
-        if name not in self._missing:
-            answers = [self._exists(c) for c in self._lookup_names(name)]
-            self._missing[name] = bool(answers) and all(a is False for a in answers)
-        return self._missing[name]
+    def _is_on_pypi(self, name: str) -> bool | None:
+        """Whether PyPI has a package for ``import name``. None when it was not asked,
+        or gave no answer.
+
+        Cached per name; every import occurrence is still reported separately.
+        """
+        if name not in self._on_pypi:
+            answers = [self._exists(candidate) for candidate in self._lookup_names(name)]
+            if answers and all(answer is False for answer in answers):
+                self._on_pypi[name] = False
+            else:
+                self._on_pypi[name] = True if True in answers else None
+        return self._on_pypi[name]
 
     def check_imports(self, rel: str, imports: Iterable[tuple[str, int, int]]) -> Iterator[Finding]:
-        """Report imports that no installed, declared or PyPI package provides.
+        """Report imports that no installed, declared or PyPI package provides, and
+        ones whose PyPI package is new.
 
         ``imports`` are the (module, line, column) of the imports of the file ``rel``:
         see ``source.top_level_imports``.
         """
         for name, line, col in imports:
-            if self._is_missing(name):
+            found = self._is_on_pypi(name)
+            if found is False and "SLOP001" in self._rules:
                 yield Finding(
                     "SLOP001",
                     rel,
@@ -913,4 +973,14 @@ class PackageChecker:
                     f"Import '{name}' is not installed, not declared, and no package with "
                     "that name exists on PyPI (possible hallucination)",
                     subject=name,
+                )
+            elif found and (risk := self._risk(name)):
+                yield Finding(
+                    "SLOP002",
+                    rel,
+                    line,
+                    col,
+                    f"Import '{name}' is not installed or declared, and the PyPI package "
+                    f"with that name {risk.text}",
+                    subject=risk.subject(name),
                 )

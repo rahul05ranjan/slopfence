@@ -39,6 +39,13 @@ RULES: dict[str, Rule] = {
             "Dependency or import that does not exist on PyPI (possible hallucination).",
         ),
         Rule(
+            "SLOP002",
+            "slopsquatting-risk",
+            Severity.HIGH,
+            "Dependency or import whose PyPI package is new, has a single release or is "
+            "quarantined (slopsquatting risk).",
+        ),
+        Rule(
             "SLOP010",
             "placeholder-comment",
             Severity.MEDIUM,
