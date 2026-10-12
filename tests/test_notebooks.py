@@ -876,8 +876,8 @@ def test_diff_keeps_the_changed_lines_of_a_notebook(write, check):
 
 
 def test_diff_counts_the_lines_of_the_file_under_a_textconv_driver(tmp_path):
-    """nbdime and nbstripout give notebooks a ``textconv`` diff driver, and ``git diff``
-    then counts the lines of the converted text. A finding has the line of the file,
+    """Some tools give notebooks a ``textconv`` diff driver, and ``git diff`` then
+    counts the lines of the converted text. A finding has the line of the file,
     so the changed lines are taken without the conversion."""
     git_init(tmp_path)
     (tmp_path / ".gitattributes").write_text("*.ipynb diff=ipynb\n", encoding="utf-8")

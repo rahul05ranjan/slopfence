@@ -87,7 +87,7 @@ def changed_lines(root: Path, ref: str) -> ChangedLines:
     """Lines changed between merge-base(ref, HEAD) and the working tree, plus untracked files."""
     base = _git(root, "merge-base", ref, "HEAD").strip()
     # The lines of the files as they are: no external diff tool, and no conversion to
-    # text first (a ``textconv`` driver, as nbdime sets one for notebooks).
+    # text first (a ``textconv`` driver, as some tools set one for notebooks).
     diff = _git(root, "diff", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", base)
     changed = parse_unified_diff(diff)
     untracked = _git(root, "ls-files", "-z", "--others", "--exclude-standard")
