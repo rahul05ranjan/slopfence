@@ -441,11 +441,19 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
                 understood.append(span)
                 found.private_index = found.private_index or install.private_index
                 links = links or install.links
-                for name, word, public in install.packages:
+                for name, word, sourced in install.packages:
                     at = cell.text.find(name, word.start)
                     line, col = notebook.position(cell, at if at != -1 else word.start)
                     found.dependencies.append(
-                        Dependency(name, rel, line, validate=public, suppressed=ignored, col=col)
+                        Dependency(
+                            name,
+                            rel,
+                            line,
+                            validate=not (sourced or install.variables),
+                            suppressed=ignored,
+                            col=col,
+                            own_source=sourced,
+                        )
                     )
             lines = cell.text.split("\n")
             for name, lineno, col in view.imports:

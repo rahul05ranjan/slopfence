@@ -162,8 +162,12 @@ def pip_install_arguments(words: list[Word]) -> list[Word] | None:
 class PipInstall:
     """What one ``pip install`` command says."""
 
-    # (name, the word that names it, whether PyPI may be asked about it).
+    # (name, the word that names it, whether that word says where the package comes
+    # from: a URL).
     packages: list[tuple[str, Word, bool]] = field(default_factory=list)
+    # A word still holds a variable (``$PKG``, ``{pkg}``). It may hold anything, an
+    # index option too, so none of the command's names is looked up.
+    variables: bool = False
     # The command names a package index that isn't PyPI.
     private_index: bool = False
     # The command adds links to install from (--find-links), or uses no index at all.
@@ -197,20 +201,18 @@ def _package(word: Word) -> tuple[str, Word, bool] | None:
     if "://" in text or text.startswith(("git+", "hg+", "svn+", "bzr+")):
         parsed = parse_requirement(text)  # "name @ https://..." in one quoted word
         name = parsed.name if parsed else egg_name(text)
-        return (name, word, False) if name else None
+        return (name, word, True) if name else None
     if "/" in text or text.startswith((".", "~")):
         return None  # a local path
     parsed = parse_requirement(text)
-    return (parsed.name, word, not parsed.direct) if parsed else None
+    return (parsed.name, word, parsed.direct) if parsed else None
 
 
 def pip_requirements(arguments: list[Word]) -> PipInstall | None:
     """What a ``pip install`` command names, from the words after ``install``.
 
     Returns None when the command has an option this function doesn't know: its
-    value could be mistaken for a package. When a word still holds a variable
-    (``$PKG``, ``{pkg}``), the packages are declared but none is looked up: the
-    variable may hold anything, an index option too.
+    value could be mistaken for a package.
     """
     found = PipInstall()
     words = iter(arguments)
@@ -239,6 +241,5 @@ def pip_requirements(arguments: list[Word]) -> PipInstall | None:
         elif option and option not in PIP_FLAGS:
             return None
         found.links = found.links or option in LINK_OPTIONS
-    if any(_UNEXPANDED.search(word.text) for word in arguments):
-        found.packages = [(name, word, False) for name, word, _ in found.packages]
+    found.variables = any(_UNEXPANDED.search(word.text) for word in arguments)
     return found

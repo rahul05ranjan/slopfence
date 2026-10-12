@@ -71,8 +71,8 @@ def pip(line):
         install = pip_requirements(arguments)
         if install is None:
             return None
-        public += [name for name, _, lookup in install.packages if lookup]
-        held_back += [name for name, _, lookup in install.packages if not lookup]
+        for name, _, sourced in install.packages:
+            (held_back if sourced or install.variables else public).append(name)
         index, links = index or install.private_index, links or install.links
     return (public, held_back, index, links) if seen else "not pip"
 
@@ -373,6 +373,26 @@ def test_notebook_inherits_a_private_index_from_the_project(write, check, tmp_pa
     registry = FakeRegistry(set())
     result = run([tmp_path], tmp_path, registry, select=["SLOP001"], inherit_index=False)
     assert subjects(result) == ["corp-auth"]
+
+
+def test_a_package_with_a_source_of_its_own_is_not_looked_up_in_a_notebook(write, check):
+    """A package that a project file installs from git is the same package in a
+    notebook. And one that a notebook installs from a URL is not looked up elsewhere."""
+    write("requirements.txt", "corp-auth @ git+https://git.corp.example/corp-auth.git\n")
+    write("demo.ipynb", jupyter(["%pip install corp-auth ghost-lib\n"]))
+    registry = FakeRegistry(set())
+    assert subjects(check("SLOP001", registry=registry)) == ["ghost-lib"]
+    assert registry.queries == ["ghost-lib"]
+
+    write("requirements.txt", "corp-kit\n")
+    write("demo.ipynb", jupyter(["!pip install git+https://git.corp.example/k.git#egg=corp-kit\n"]))
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+    # A variable holds the names of its own command back, and no other.
+    write("demo.ipynb", jupyter(["!pip install $OPTS corp-kit\n"]))
+    registry = FakeRegistry(set())
+    assert found(check("SLOP001", registry=registry)) == [("requirements.txt", 1, 1)]
+    assert registry.queries == ["corp-kit"]
 
 
 def test_names_that_never_leave_the_machine(write, check):

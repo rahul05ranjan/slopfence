@@ -1288,6 +1288,82 @@ def test_own_names_count_in_excluded_folders_too(write, check):
     assert registry.queries == []
 
 
+# --- A package that one file takes from a place of its own -----------------------------
+
+GIT = "git+https://git.corp.example/corp/corp-auth.git"
+# Each file says where ``corp-auth`` comes from, in its own way.
+SOURCED = {
+    "direct reference": ("requirements.txt", f"corp-auth @ {GIT}@v1\nrequests\n"),
+    "egg": ("requirements.txt", f"-e {GIT}#egg=corp-auth\nrequests\n"),
+    "Pipfile git": ("Pipfile", f'[packages]\ncorp-auth = {{git = "{GIT}"}}\nrequests = "*"\n'),
+    "pyproject URL": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\n'
+        'dependencies = ["corp-auth @ https://corp.example/corp_auth-1.0.whl", "requests"]\n',
+    ),
+    "uv source": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["corp-auth", "requests"]\n\n'
+        f'[tool.uv.sources]\ncorp-auth = {{ git = "{GIT}" }}\n',
+    ),
+    "uv explicit index": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["corp-auth", "requests"]\n\n'
+        f'[[tool.uv.index]]\nname = "corp"\nurl = "{PRIVATE}"\nexplicit = true\n\n'
+        '[tool.uv.sources]\ncorp-auth = { index = "corp" }\n',
+    ),
+    "Poetry explicit source": (
+        "pyproject.toml",
+        '[tool.poetry]\nname = "demo"\n\n[tool.poetry.dependencies]\nrequests = "*"\n'
+        'corp-auth = { version = "^1", source = "corp" }\n\n'
+        f'[[tool.poetry.source]]\nname = "corp"\nurl = "{PRIVATE}"\npriority = "explicit"\n',
+    ),
+    "setup.cfg direct reference": (
+        "setup.cfg",
+        f"[options]\ninstall_requires =\n    corp-auth @ {GIT}\n    requests\n",
+    ),
+}
+# The files that name the package again, without saying where it comes from.
+NAMED_AGAIN = {
+    "legacy/setup.py": (
+        'from setuptools import setup\nsetup(name="old", install_requires=["corp-auth>=1"])\n'
+    ),
+    "tools/setup.cfg": "[options]\ninstall_requires =\n    corp-auth\n",
+    "constraints.txt": "corp-auth==1.2.3\nrequests==2.32.0\n",
+    "requirements.in": "Corp_Auth\nrequests\n",
+    "tools/Pipfile": '[packages]\ncorp-auth = "*"\n',
+    "docs/requirements.txt": "corp-auth\n",
+    "sub/pyproject.toml": '[project]\nname = "sub"\ndependencies = ["corp-auth"]\n',
+}
+
+
+@pytest.mark.parametrize("layout", sorted(SOURCED))
+def test_a_package_with_a_source_of_its_own_is_not_looked_up_in_any_file(write, tmp_path, layout):
+    """One file installs ``corp-auth`` from git, a URL or an index it names. The same
+    name in another file is the same package, so it is never sent and never reported:
+    in the files v0.2 read, in the new ones, and when a single file is checked."""
+    name, body = SOURCED[layout]
+    write(name, body)
+    again = [write(rel, text) for rel, text in NAMED_AGAIN.items()]
+    for paths in ([tmp_path], *([path] for path in again)):
+        registry = FakeRegistry({"requests"})
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and set(registry.queries) <= {"requests"}
+        assert result.notes == []
+
+
+def test_a_name_held_back_for_another_reason_is_still_looked_up_elsewhere(write, check):
+    """Only an entry that says where its package comes from speaks for other files. A
+    file-wide ``--find-links``, or an ignore comment, covers its own line and no more."""
+    write("requirements.txt", "--find-links ./wheels\nghost-one\n")
+    write("requirements-dev.txt", "ghost-two  # slopfence: ignore\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    ghost-one\n    ghost-two\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("setup.cfg", 3, 1), ("setup.cfg", 4, 1)]
+    assert sorted(registry.queries) == ["ghost-one", "ghost-two"]
+
+
 @pytest.mark.parametrize(
     "body",
     [

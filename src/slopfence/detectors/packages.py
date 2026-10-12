@@ -116,6 +116,22 @@ class ProjectIndex:
         return {normalize(name) for file in self.files for name in file.project_names}
 
     @property
+    def sourced_names(self) -> set[str]:
+        """The packages (normalized) that some file takes from a place of their own.
+
+        ``corp-auth @ git+https://...`` in one file says where ``corp-auth`` comes
+        from. The same name without the URL in another file (a ``setup.py``, a
+        constraints file, a notebook) is the same package. So it is never looked up,
+        wherever it is declared.
+        """
+        return {
+            normalize(dep.name)
+            for file in self.files
+            for dep in file.dependencies
+            if dep.own_source
+        }
+
+    @property
     def private_index_files(self) -> list[str]:
         """Project files that let packages come from a non-PyPI index."""
         return [file.rel for file in self.files if file.private_index] + self.private_lock_files
@@ -312,7 +328,11 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
             pip_syntax = True
             # Options and bare URLs/paths: the name is only known from #egg=.
             if name := egg_name(line):
-                deps.append(Dependency(name, rel, lineno, validate=False, suppressed=suppressed))
+                deps.append(
+                    Dependency(
+                        name, rel, lineno, validate=False, suppressed=suppressed, own_source=True
+                    )
+                )
             continue
         spec = _LINE_OPTIONS.sub("", line.rstrip("\\").rstrip())
         parsed = parse_requirement(spec)
@@ -329,6 +349,7 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
                 lineno,
                 validate=not (parsed.direct or private_index or links),
                 suppressed=suppressed,
+                own_source=parsed.direct,
             )
         )
     found = DependencyFile(rel, Kind.REQUIREMENTS, private_index=private_index)
@@ -463,8 +484,11 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
         if normalize(name) == project_name:  # self-references like "pkg[extra]"
             return
         line = finder.spec(table, array, spec)
-        validate = not private_index and "://" not in spec and normalize(name) not in uv_sources
-        deps.append(Dependency(name, rel, line, validate, finder.suppressed(line)))
+        sourced = "://" in spec or normalize(name) in uv_sources
+        validate = not (private_index or sourced)
+        deps.append(
+            Dependency(name, rel, line, validate, finder.suppressed(line), own_source=sourced)
+        )
 
     for spec in _array(project.get("dependencies")):
         add_spec("project", "dependencies", spec)
@@ -502,7 +526,9 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
             )
             line = finder.key(table, name)
             validate = not (external or private_index)
-            deps.append(Dependency(name, rel, line, validate, finder.suppressed(line)))
+            deps.append(
+                Dependency(name, rel, line, validate, finder.suppressed(line), own_source=external)
+            )
     return found
 
 
@@ -541,9 +567,16 @@ def _parse_pipfile(text: str, rel: str) -> DependencyFile:
         entries = data.get(table)
         for name, spec in entries.items() if isinstance(entries, dict) else ():
             line = finder.key(table, name)
-            validate = not private and _pipfile_entry_is_public(spec, public)
+            from_index = _pipfile_entry_is_public(spec, public)
             found.dependencies.append(
-                Dependency(name, rel, line, validate, finder.suppressed(line))
+                Dependency(
+                    name,
+                    rel,
+                    line,
+                    validate=from_index and not private,
+                    suppressed=finder.suppressed(line),
+                    own_source=not from_index,
+                )
             )
     return found
 
@@ -592,7 +625,8 @@ class PackageChecker:
         # Where the environment configures a non-PyPI index (pip.conf, PIP_INDEX_URL...).
         self.private_index = private_index
         self.inherited_from = list(inherited_from)
-        self._own_names = index.own_names
+        # Names that are never looked up, in whichever file they are declared.
+        self._not_from_pypi = index.own_names | index.sourced_names
         self._installed = _installed_modules()
         self._provided_by = index.declared | index.locked
         self._missing: dict[str, bool] = {}
@@ -621,13 +655,14 @@ class PackageChecker:
         """Whether a declared dependency, by itself, is one PyPI can be asked about.
 
         Not one from a URL, a path or a private index, not one with an ignore
-        comment, not a known package, and not a package of the project's own.
+        comment, not a known package, not a package of the project's own, and not
+        one that another file takes from a place of its own.
         """
         return (
             dep.validate
             and not dep.suppressed
             and not self._is_known(dep.name)
-            and normalize(dep.name) not in self._own_names
+            and normalize(dep.name) not in self._not_from_pypi
         )
 
     def _inherits(self, file: DependencyFile) -> bool:

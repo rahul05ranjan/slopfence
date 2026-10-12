@@ -187,6 +187,7 @@ A requirements file is a `.txt` or `.in` file whose name starts or ends with `re
 Some names are read and never looked up:
 
 - **Your own packages.** The `name` in any `pyproject.toml`, `setup.cfg` or `setup.py` of the project is a package of this repository, so a dependency on it is not a hallucination.
+- **Packages from a URL, a path or git.** `corp-auth @ git+https://...` in one file says where `corp-auth` comes from. It is not looked up there, and not in any other file that names it. The same goes for a `[tool.uv.sources]` entry, a Poetry entry with `source`, `git`, `path` or `url`, and a `Pipfile` entry with `git`, `path`, `file`, `url` or an `index` that is not PyPI.
 - **Lines that are not requirements.** `python>=3.9`, a file name (`vendor.tar.gz`), a path, a checksum. A file with more prose than requirements is skipped as a whole.
 - **Lists for another tool.** A file with one bare name per line, and no version, extra, marker or option anywhere, may list packages for apt or R. If its name is not `requirements*.txt`, and PyPI lacks more of its names than it has, nothing in it is reported.
 
@@ -205,7 +206,7 @@ slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001`. 
 
 | Names sent to PyPI | When |
 |---|---|
-| Dependencies declared in requirements files, `pyproject.toml`, `setup.cfg`, `setup.py`, `Pipfile`, and `pip install` lines in notebooks (see [Where `SLOP001` finds dependencies](#where-slop001-finds-dependencies)) | By default. These names are already meant for a package index. Entries installed from URLs, paths or git are never sent. Neither is a package of your own project, or any dependency that may come from a private index (see [Private package indexes](#private-package-indexes)) |
+| Dependencies declared in requirements files, `pyproject.toml`, `setup.cfg`, `setup.py`, `Pipfile`, and `pip install` lines in notebooks (see [Where `SLOP001` finds dependencies](#where-slop001-finds-dependencies)) | By default. These names are already meant for a package index. Entries installed from URLs, paths or git are never sent, also where another file names the same package without the URL. Neither is a package of your own project, or any dependency that may come from a private index (see [Private package indexes](#private-package-indexes)) |
 | Imports in your source code and notebooks that aren't stdlib, installed, part of your project, or provided by a declared or locked package | **Only with `--check-imports`** (or `check-imports = true`). This can catch an invented package that was imported but never declared, but for private code it may reveal internal package names |
 
 Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`, or a dependency or import under an [ignore comment](#ignoring-a-finding) (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`). Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. With `--diff`, only the dependency files in the diff are looked up. `--offline` sends nothing at all.

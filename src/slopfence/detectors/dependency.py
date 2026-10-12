@@ -124,6 +124,10 @@ class Dependency:
     suppressed: bool = False
     # 1-based column of the requirement. Files with one requirement per line report 1.
     col: int = 1
+    # True when the entry itself says where the package comes from: a URL, a path, git,
+    # or a package source that it picks by name. That holds for the package, not just
+    # for this entry: see ``ProjectIndex.sourced_names``.
+    own_source: bool = False
 
 
 @dataclass

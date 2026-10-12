@@ -162,6 +162,7 @@ def parse_setup_cfg(text: str, rel: str) -> DependencyFile:
                     lineno,
                     validate=not (parsed.direct or private),
                     suppressed=ignore_file or suppresses_slop001(comments[lineno - 1]),
+                    own_source=parsed.direct,
                 )
             )
     found.dependencies.sort(key=lambda dep: dep.line)
@@ -470,6 +471,7 @@ def parse_setup_py(src: SourceFile) -> DependencyFile:
                         validate=not (parsed.direct or private),
                         suppressed=src.ignore_file or suppresses_slop001(comments.get(line, "")),
                         col=col,
+                        own_source=parsed.direct,
                     )
                 )
     found.dependencies.sort(key=lambda dep: (dep.line, dep.col, dep.name))
