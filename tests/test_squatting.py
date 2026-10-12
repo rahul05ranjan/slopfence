@@ -989,7 +989,13 @@ def test_cli_with_a_cache_pinned_the_v02_way_asks_and_reports_nothing(pinned, ca
     """CI and users pin ``{name: [found, time]}``. Such a file answers by itself, and
     without facts there is no SLOP002 finding."""
     root, _, asked = pinned
-    v02 = {"requests": [True, 1791739900], "brand-new-lib": [True, 9e12], "ghost-zz": [False, 9e12]}
+    # One entry stamped as a v0.2 run an hour ago would stamp it, the others pinned for good.
+    an_hour_ago = int(time.time()) - 3600
+    v02 = {
+        "requests": [True, an_hour_ago],
+        "brand-new-lib": [True, 9e12],
+        "ghost-zz": [False, 9e12],
+    }
     cache = root / "cache" / "slopfence" / "pypi.json"
     cache.write_text(json.dumps(v02), encoding="utf-8")
     (root / "requirements.txt").write_text("requests\nbrand-new-lib\nghost-zz\n", encoding="utf-8")
