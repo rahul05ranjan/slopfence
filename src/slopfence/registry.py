@@ -29,7 +29,7 @@ from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from slopfence import __version__
 from slopfence.files import replace_text
-from slopfence.listing import PackageInfo, is_young, parse_listing, seen_upload_times
+from slopfence.listing import PackageInfo, is_young, oldest_seen_upload, parse_listing
 
 EXISTS_TTL = 7 * 24 * 3600
 MISSING_TTL = 24 * 3600
@@ -416,7 +416,7 @@ class PyPIRegistry:
         never reports a package that old. A second request, for the whole listing,
         is only sent when the listing is longer and every file seen is young. Only a
         whole listing can show that a package is young (see
-        ``listing.seen_upload_times``). The status and the versions come after the
+        ``listing.oldest_seen_upload``). The status and the versions come after the
         files, so they are only read from a whole listing too.
 
         This runs on worker threads: it reads ``self._now`` and changes nothing but
@@ -429,8 +429,8 @@ class PyPIRegistry:
             return Lookup(start.found)
         if start.complete:
             return Lookup(True, parse_listing(start.text))
-        seen = seen_upload_times(start.text)
-        if not seen or not is_young(min(seen), self._now):
+        oldest = oldest_seen_upload(start.text)
+        if oldest is None or not is_young(oldest, self._now):
             return Lookup(True)
         if self._unreachable:
             # Another request found PyPI out of reach in the meantime. The package

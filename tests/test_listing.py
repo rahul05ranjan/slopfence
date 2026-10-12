@@ -9,8 +9,8 @@ from slopfence.listing import (
     YOUNG_SECONDS,
     PackageInfo,
     is_young,
+    oldest_seen_upload,
     parse_listing,
-    seen_upload_times,
 )
 from tests.conftest import DAY, NOW
 
@@ -126,16 +126,27 @@ def test_numbers_in_a_listing_are_never_converted():
     assert parse_listing(doc) == PackageInfo(1790959879, 1, None)
 
 
-def test_upload_times_are_found_in_a_listing_that_was_cut_off():
+def test_oldest_upload_time_is_found_in_a_listing_that_was_cut_off():
     """The start of a long listing is not valid JSON, but its upload times can be read."""
-    text = listing("2026-10-02T16:51:19Z", "2014-11-11T20:30:40.123Z")[:-25]
+    text = listing("2026-10-02T16:51:19Z", "2014-11-11T20:30:40.123Z", "2019-01-01T00:00:00Z")[:-25]
     assert parse_listing(text) is None
-    assert sorted(seen_upload_times(text)) == [1415737840, 1790959879]
+    assert oldest_seen_upload(text) == 1415737840
     # The last time may be cut off itself: whatever is whole up to the second counts.
-    assert seen_upload_times(b'{"files": [{"upload-time": "2014-11-11T20:30:40.1') == [1415737840]
-    assert seen_upload_times(b'{"files": [{"upload-time": "2014-11-11T20:30') == []
-    assert seen_upload_times(b'{"files": [{"upload-time":"2014-13-11T20:30:40Z"}]}') == []
-    assert seen_upload_times(b"") == []
+    assert oldest_seen_upload(b'{"files": [{"upload-time": "2014-11-11T20:30:40.1') == 1415737840
+    assert oldest_seen_upload(b'{"files": [{"upload-time": "2014-11-11T20:30') is None
+    assert oldest_seen_upload(b'{"files": [{"filename": "x"}, {"filename": "y"}') is None
+    assert oldest_seen_upload(b"") is None
+
+
+def test_a_time_that_is_no_real_date_is_passed_over():
+    """Month 13 sorts before a real date and is no date: the oldest real one counts."""
+    text = (
+        b'{"files": [{"upload-time": "2013-13-01T00:00:00Z"}, '
+        b'{"upload-time": "2020-02-30T00:00:00Z"}, {"upload-time": "2021-05-06T07:08:09Z"}, '
+        b'{"upload-time": "2024-01-01T00:00:00Z"}'
+    )
+    assert oldest_seen_upload(text) == 1620284889
+    assert oldest_seen_upload(b'{"files": [{"upload-time":"2014-13-11T20:30:40Z"}]}') is None
 
 
 def test_a_file_name_cannot_pass_for_an_upload_time():
@@ -145,7 +156,7 @@ def test_a_file_name_cannot_pass_for_an_upload_time():
     files = [{"filename": fake, "yanked": fake, "upload-time": "2026-10-02T16:51:19Z"}]
     for ensure_ascii in (True, False):
         text = json.dumps({"files": files}, ensure_ascii=ensure_ascii).encode()
-        assert seen_upload_times(text) == [1790959879]
+        assert oldest_seen_upload(text) == 1790959879
 
 
 def test_young_is_under_a_year():

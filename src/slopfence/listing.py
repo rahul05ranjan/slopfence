@@ -28,9 +28,10 @@ YOUNG_SECONDS = YOUNG_PACKAGE_DAYS * 86400
 # An upload time as PEP 700 writes it: UTC, with or without a fraction of a second.
 # ``datetime.fromisoformat`` only takes the "Z" from Python 3.11 on.
 _UPLOAD_TIME = re.compile(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d{1,6})?Z")
-# The same in a listing that was cut off, where the last time may be cut off too. A
-# file name can't pass for one: inside a JSON string a quote is written as \".
-_UPLOAD_TIMES = re.compile(rb'"upload-time":\s*"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)')
+# The same, down to the second, in a listing that was cut off: the last time may be
+# cut off too. A file name can't pass for one: inside a JSON string a quote is
+# written as \".
+_UPLOAD_TIMES = re.compile(rb'"upload-time":\s*"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)')
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,7 @@ def is_young(uploaded: float, now: float) -> bool:
     return now - uploaded < YOUNG_SECONDS
 
 
-def _seconds(parts: tuple[str | bytes, ...]) -> int | None:
+def _seconds(parts: tuple[str, ...]) -> int | None:
     """The Unix time of (year, month, day, hour, minute, second) in UTC.
 
     None for a date or time that doesn't exist, such as month 13 or second 61.
@@ -78,14 +79,18 @@ def _timestamp(value: object) -> int | None:
     return _seconds(m.groups()) if m else None
 
 
-def seen_upload_times(text: bytes) -> list[int]:
-    """The upload times in the start of a listing that was cut off, so is not valid JSON.
+def oldest_seen_upload(text: bytes) -> int | None:
+    """The oldest upload time in the start of a listing that was cut off, so is not
+    valid JSON. None when that part shows no upload time.
 
-    They can show that a package is old: one old file is enough. They can't show
-    that it is young, because an older file may follow in the part that is missing.
+    It can show that a package is old: one old file is enough. It can't show that a
+    package is young, because an older file may follow in the part that is missing.
     """
-    times = (_seconds(m.groups()) for m in _UPLOAD_TIMES.finditer(text))
-    return [time for time in times if time is not None]
+    # Times written this way sort like the moments they name. So only the first one
+    # that is a real date has to be converted, not each of the hundred or so.
+    seen = sorted(set(_UPLOAD_TIMES.findall(text)))
+    times = (_timestamp(stamp.decode("ascii") + "Z") for stamp in seen)
+    return next((time for time in times if time is not None), None)
 
 
 def _unread(number: str) -> None:
