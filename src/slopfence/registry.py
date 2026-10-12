@@ -48,11 +48,17 @@ SIMPLE_TYPES = "application/vnd.pypi.simple."
 LISTING_LIMIT = 16 * 1024
 # The most bytes that are read when the whole listing is needed.
 FULL_LISTING_LIMIT = 512 * 1024
-# The most text a listing may unpack to, so that no answer can use up the memory.
+# The most text a listing may unpack to: a few kilobytes can unpack to gigabytes. What
+# the JSON parser may make of that text is limited in ``listing.parse_listing``.
 MAX_LISTING_TEXT = 8 * 1024 * 1024
 # A body that is not read this many seconds after its request was sent is given up.
-# ``timeout`` alone limits each step before the body: the connection, the headers.
+# ``timeout`` alone limits each step before the body: the connection, and each line
+# of the headers. So a server that sends its headers a line at a time, each just
+# within the timeout, is waited for longer, as it was in v0.2.
 READ_DEADLINE = 10.0
+# No time in a cache file is further from 0 than this (Unix seconds). CI pins entries
+# with 9e12.
+MAX_TIME = 1e18
 # The cache key that holds the facts. It is never a package name, and v0.2 keeps a
 # key that it doesn't know.
 META_KEY = "_meta"
@@ -66,6 +72,15 @@ _CONTENT_RANGE = re.compile(r"bytes\s+0-(\d{1,18})/(\d{1,18})\s*$")
 def normalize(name: str) -> str:
     """PEP 503 name normalization."""
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def is_pypi_name(name: str) -> bool:
+    """Whether PyPI can hold a package with this name, in any spelling of it.
+
+    ASCII letters and digits, with ``-``, ``_`` or ``.`` between them. No registry
+    is asked about another name (``_speedups``, ``café``): there is nothing to ask.
+    """
+    return _NAME.fullmatch(normalize(name)) is not None
 
 
 class Lookup(NamedTuple):
@@ -136,14 +151,23 @@ class _Listing(NamedTuple):
     complete: bool = False
 
 
+def _is_time(value: object) -> bool:
+    """Whether a value of the cache file can be a time: a number the clock can be
+    compared with.
+
+    Not a whole number of hundreds of digits, which JSON can hold and no float
+    arithmetic takes. ``type``, not ``isinstance``: True is an int too.
+    """
+    return type(value) is float or (type(value) is int and abs(value) < MAX_TIME)
+
+
 def _is_entry(cached: object) -> bool:
     """Whether a value of the cache file is a well-formed ``[found, time]`` entry."""
     return (
         isinstance(cached, list)
         and len(cached) == 2
         and isinstance(cached[0], bool)
-        # ``type``, not ``isinstance``: True is an int too.
-        and type(cached[1]) in (int, float)
+        and _is_time(cached[1])
     )
 
 
@@ -154,11 +178,11 @@ def _are_facts(stored: object) -> bool:
         return False
     first, releases, status, checked = stored
     return (
-        (first is None or type(first) is int)
+        (first is None or (type(first) is int and _is_time(first)))
         and type(releases) is int
         and releases >= 0
         and (status is None or isinstance(status, str))
-        and type(checked) in (int, float)
+        and _is_time(checked)
     )
 
 
@@ -167,7 +191,8 @@ def _read_body(response: http.client.HTTPResponse, limit: int, deadline: float) 
 
     The one byte more shows that the body is longer than ``limit``. Raises
     TimeoutError when the clock passes ``deadline`` (a ``time.monotonic`` value)
-    before the body is read.
+    before the body is read, and ``IncompleteRead`` when the connection ends before
+    the bytes that ``Content-Length`` promised.
     """
     body = bytearray()
     while len(body) <= limit:
@@ -177,6 +202,11 @@ def _read_body(response: http.client.HTTPResponse, limit: int, deadline: float) 
         # at again at least once per timeout.
         part = response.read1(limit + 1 - len(body))
         if not part:
+            # ``read1`` gives nothing at the end of a body, and also when the
+            # connection ends early. Only ``length`` tells the two apart: the bytes
+            # still to come, None when the server did not say.
+            if response.length:
+                raise http.client.IncompleteRead(bytes(body), response.length)
             break
         body += part
     return bytes(body)
@@ -330,14 +360,11 @@ class PyPIRegistry:
     def _known(self, key: str) -> bool | None:
         """What is known about a normalized name without asking PyPI. None if nothing is.
 
-        A name that PyPI can't hold does not exist: no request is needed to say so.
-        For any other name it is the cached answer, while that is fresh. Facts have a
-        time of their own. So a name with facts is asked for again a day after they
-        were read, also when a v0.2 run has rewritten its entry since. An entry
-        without facts (written by v0.2, or pinned) is trusted as it is.
+        It is the cached answer, while that is fresh. Facts have a time of their own.
+        So a name with facts is asked for again a day after they were read, also
+        when a v0.2 run has rewritten its entry since. An entry without facts
+        (written by v0.2, or pinned) is trusted as it is.
         """
-        if not _NAME.fullmatch(key):
-            return False
         entry = self._cache.get(key)
         if not _is_entry(entry):
             return None
@@ -369,9 +396,15 @@ class PyPIRegistry:
         """Ask PyPI about the keys that nothing is known about, and cache what it says.
 
         An unknown answer (unreachable, rate limited, an unexpected status) is not cached,
-        so the next run asks again. This run does not: each key is requested once.
+        so the next run asks again. This run does not: each key is requested once. A
+        key that PyPI can't hold as a name is never requested, so nothing is known
+        about it: only PyPI's own answer says that a package is missing.
         """
-        wanted = [key for key in keys if key not in self._asked and self._known(key) is None]
+        wanted = [
+            key
+            for key in keys
+            if _NAME.fullmatch(key) and key not in self._asked and self._known(key) is None
+        ]
         self._asked.update(wanted)
         for key, answer in zip(wanted, self._query_all(wanted), strict=True):
             if answer is not None:
@@ -414,10 +447,11 @@ class PyPIRegistry:
         One request, for the start of the file listing. It is enough for a package
         whose listing fits in it, and for one with an old file in that part: SLOP002
         never reports a package that old. A second request, for the whole listing,
-        is only sent when the listing is longer and every file seen is young. Only a
-        whole listing can show that a package is young (see
-        ``listing.oldest_seen_upload``). The status and the versions come after the
-        files, so they are only read from a whole listing too.
+        is only sent when the listing is longer and no file seen is old: every one
+        is young, or the part shows no upload time at all. Only a whole listing can
+        show that a package is young (see ``listing.oldest_seen_upload``). The status
+        and the versions come after the files, so they are only read from a whole
+        listing too.
 
         This runs on worker threads: it reads ``self._now`` and changes nothing but
         ``self._unreachable``.
@@ -430,7 +464,7 @@ class PyPIRegistry:
         if start.complete:
             return Lookup(True, parse_listing(start.text))
         oldest = oldest_seen_upload(start.text)
-        if oldest is None or not is_young(oldest, self._now):
+        if oldest is not None and not is_young(oldest, self._now):
             return Lookup(True)
         if self._unreachable:
             # Another request found PyPI out of reach in the meantime. The package

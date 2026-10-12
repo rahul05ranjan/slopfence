@@ -58,7 +58,14 @@ from slopfence.detectors.setuptools_files import parse_setup_cfg, parse_setup_py
 from slopfence.detectors.squatting import Risk, assess
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
 from slopfence.models import NEW_PACKAGE_DAYS, Finding
-from slopfence.registry import BatchRegistry, FactsRegistry, OfflineRegistry, Registry, normalize
+from slopfence.registry import (
+    BatchRegistry,
+    FactsRegistry,
+    OfflineRegistry,
+    Registry,
+    is_pypi_name,
+    normalize,
+)
 from slopfence.source import IGNORE_FILE_RE, load, read_source
 from slopfence.source import relative_path as _rel
 
@@ -717,6 +724,16 @@ def _is_installed(name: str, installed: set[str]) -> bool:
 _FileDependencies = tuple[DependencyFile, list[Dependency]]
 
 
+def _package_names(module: str) -> list[str]:
+    """The names a PyPI package that provides ``import module`` may have.
+
+    Sorted, so that requests go out in the same order on every run. Empty for a
+    module whose name PyPI can't hold as a package name (``_speedups``, ``café``):
+    no registry is asked about it, so none can call it missing.
+    """
+    return sorted(name for name in {module, module.replace("_", "-")} if is_pypi_name(name))
+
+
 class PackageChecker:
     """Looks up dependencies and imports on PyPI, for both package rules.
 
@@ -843,8 +860,7 @@ class PackageChecker:
         if self._asks_nobody or self.index.private_index_files:
             return []
         if name not in self._candidates:
-            # Sorted, so that requests go out in the same order on every run.
-            found = sorted({name, name.replace("_", "-")}) if self._should_lookup(name) else []
+            found = _package_names(name) if self._should_lookup(name) else []
             self._candidates[name] = found
         return self._candidates[name]
 
@@ -893,7 +909,7 @@ class PackageChecker:
             return True
         # A project whose own files use a private index never has its imports looked up.
         return not self.index.private_index_files and any(
-            not self._is_provided(name) for name in imports
+            _package_names(name) and not self._is_provided(name) for name in imports
         )
 
     def _risk(self, name: str) -> Risk | None:

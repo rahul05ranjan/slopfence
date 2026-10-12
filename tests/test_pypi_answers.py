@@ -34,21 +34,12 @@ from slopfence.registry import (
     PyPIRegistry,
 )
 from tests.conftest import DAY, NOW, DownRegistry, FakeFactsRegistry, FakeRegistry
+from tests.test_listing import listing
 
 
 def ago(days):
     """An upload time ``days`` days before ``NOW``, as PyPI writes it."""
     return time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime(NOW - days * DAY))
-
-
-def listing(*uploads, versions=None, status="active"):
-    """A Simple API JSON document with one file per upload time."""
-    files = [{"filename": f"pkg-{n}.tar.gz", "upload-time": t} for n, t in enumerate(uploads)]
-    doc = {"files": files, "meta": {"api-version": "1.4"}, "name": "pkg"}
-    doc["versions"] = [str(n) for n in range(len(files))] if versions is None else versions
-    if status:
-        doc["project-status"] = {"status": status}
-    return json.dumps(doc).encode()
 
 
 class FakeResponse:
@@ -64,6 +55,10 @@ class FakeResponse:
         self._body = body
         self._at = 0
         self.reads = 0
+        # As in ``http.client``: the bytes of ``Content-Length`` that are still to come.
+        # None when the server did not say how long the body is.
+        promised = self.headers["Content-Length"]
+        self.length = None if promised is None else int(promised)
 
     def read1(self, amount=-1):
         """The next part of the body: at most ``amount`` bytes, and never more than 1000."""
@@ -71,6 +66,8 @@ class FakeResponse:
         size = 1000 if amount < 0 else min(amount, 1000)
         part = self._body[self._at : self._at + size]
         self._at += len(part)
+        if self.length is not None:
+            self.length -= len(part)
         return part
 
     def __enter__(self):
@@ -185,26 +182,32 @@ def test_request_asks_for_the_start_of_the_simple_json_listing(pypi):
     "name", ["café", "_private", "trailing_", "a/b", "../etc", "x?y=1", "a b", "", "naïve-pkg"]
 )
 def test_a_name_that_pypi_cannot_hold_is_never_requested(pypi, name):
-    """Such a package does not exist, and no text that is no name is put in a URL."""
+    """No text that is no name is put in a URL. PyPI was not asked, so nothing is known:
+    only its own 404 says "missing"."""
     reg, _, requests = pypi
-    assert reg.exists(name) is False
+    assert reg.exists(name) is None
     reg.prefetch([name, name])
     assert requests == [] and reg.info(name) is None
     reg.save()
     assert not reg.cache_file.exists()  # nothing was learned from PyPI
 
 
-def test_import_that_is_no_pypi_name_is_reported_without_a_request(write, tmp_path, pypi):
+def test_import_that_is_no_pypi_name_is_not_asked_about(write, tmp_path, pypi, not_installed):
     """``import café`` used to end the run with a traceback: urllib can't send the name.
-    PyPI can hold no such package, so the import is reported, and nothing is sent."""
-    reg, _, requests = pypi
-    write("app.py", "import café\nimport _hidden_ext_zz\n")
+    No registry is asked about a name PyPI can't hold, so none can call it missing:
+    not PyPI out of reach, not a registry that knows nothing, not a run that is offline."""
+    reg, answers, requests = pypi
+    answers["ghost-zz"] = answers["ghost_zz"] = urllib.error.URLError("no network")
+    write("app.py", "import café\nimport _hidden_ext_zz\nimport trailing_\nimport ghost_zz\n")
     result = run([tmp_path], tmp_path, reg, select=["SLOP001"], check_imports=True)
-    assert [(f.rule, f.line, f.subject) for f in result.findings] == [
-        ("SLOP001", 1, "café"),
-        ("SLOP001", 2, "_hidden_ext_zz"),
-    ]
-    assert requests == [] and result.unchecked_rules == []
+    assert result.findings == [] and names(requests) == ["ghost-zz"]
+    assert result.unchecked_rules == ["SLOP001"]  # because of ghost_zz, and of nothing else
+
+    write("app.py", "import café\nimport _hidden_ext_zz\nimport trailing_\n")
+    for other in (FakeRegistry(set()), DownRegistry(), OfflineRegistry()):
+        result = run([tmp_path], tmp_path, other, select=["SLOP001"], check_imports=True)
+        assert result.findings == [] and result.unchecked_rules == []
+        assert getattr(other, "queries", []) == []
 
 
 def test_redirects_are_not_followed(tmp_path, monkeypatch):
@@ -330,14 +333,20 @@ def test_no_second_request_once_pypi_is_out_of_reach(pypi):
 
 
 def test_server_that_ignores_range_is_read_up_to_the_limit(pypi):
-    """A plain 200 answer: complete if it ends within the limit, cut off otherwise."""
+    """A plain 200 answer: complete if it ends within the limit, cut off otherwise. A
+    cut-off one is the start of a listing, like a ranged answer."""
     reg, answers, requests = pypi
     answers["small"] = FakeResponse(listing(ago(4)))
-    big = FakeResponse(b" " * (LISTING_LIMIT + 5000))
-    answers["big"] = big
+    doc = long_listing(20)
+    start = FakeResponse(doc)  # the whole listing, although 16 KB were asked for
+    answers["big"] = [start, zipped(doc)]
     assert reg.exists("small") is True and reg.info("small").releases == 1
-    assert reg.exists("big") is True and reg.info("big") is None
-    assert big._at == LISTING_LIMIT + 1 and len(requests) == 2
+    assert len(requests) == 1
+    assert reg.exists("big") is True
+    assert start._at == LISTING_LIMIT + 1 < len(doc)
+    # Every file in the part that was read is young, so the whole listing is asked for.
+    assert [r.get_header("Range") for r in requests[1:]] == [f"bytes=0-{LISTING_LIMIT - 1}", None]
+    assert reg.info("big") == PackageInfo(NOW - 20 * DAY, 200, "active")
 
 
 def test_info_never_sends_a_request(pypi):
@@ -409,6 +418,33 @@ def test_no_answer_from_pypi_is_unknown_and_ends_the_lookups(pypi, answer):
     assert PyPIRegistry(reg.cache_file.parent, now=NOW).exists("y") is True  # the next run asks
 
 
+@pytest.mark.parametrize("status", [200, 206])
+def test_a_body_that_breaks_off_is_no_answer(pypi, status):
+    """The connection ends before the bytes that ``Content-Length`` promised: PyPI did
+    not answer. Calling the package known would keep SLOP002 from it for a week."""
+    reg, answers, requests = pypi
+    body = gzip.compress(listing(ago(3)))
+    half = FakeResponse(
+        body[: len(body) // 2],
+        status,
+        Content_Encoding="gzip",
+        Content_Length=str(len(body)),
+        Content_Range=f"bytes 0-{len(body) - 1}/{len(body)}",
+    )
+    answers["young-lib"] = half
+    answers["next"] = partial(listing(ago(3)))
+    assert reg.exists("young-lib") is None and reg.info("young-lib") is None
+    assert reg.exists("next") is None and names(requests) == ["young-lib"]
+    reg.save()
+    assert not reg.cache_file.exists()
+    # The whole body, with the same headers, is an answer like any other.
+    whole = FakeResponse(body, status, **{k.replace("-", "_"): v for k, v in half.headers.items()})
+    answers["young-lib"] = whole
+    later = PyPIRegistry(reg.cache_file.parent, now=NOW)
+    assert later.exists("young-lib") is True and later.info("young-lib") is not None
+    assert whole.length == 0
+
+
 def test_other_forms_of_the_simple_api_mean_exists(pypi):
     """If PyPI answers with the HTML form, the package exists and nothing more is known."""
     reg, answers, requests = pypi
@@ -436,13 +472,48 @@ def test_an_answer_that_cannot_be_read_is_exists_with_nothing_known(pypi, monkey
     answers["empty"]._body = b""
     answers["brotli"] = FakeResponse(doc, 200, Content_Encoding="br")
     answers["not-json"] = zipped(b"<html>but with PyPI's content type</html>")
-    monkeypatch.setattr(registry, "MAX_LISTING_TEXT", 50)
-    answers["bomb"] = zipped(b" " * 5000)
     for name in list(answers):
         assert reg.exists(name) is True, name
         assert reg.info(name) is None, name
     assert len(requests) == len(answers) and reg._meta == {}
-    assert registry.MAX_LISTING_TEXT == 50 and reg._cache["bomb"] == [True, NOW]
+
+
+def test_no_more_text_is_unpacked_than_the_limit(pypi, monkeypatch):
+    """A small answer can unpack to a huge text. Past the limit it is not unpacked, and
+    what was unpacked is not read as a listing."""
+    reg, answers, _ = pypi
+    doc = listing(ago(3)) + b" " * 5000  # a listing with facts, were it read whole
+    answers["fits"] = zipped(doc)
+    answers["bomb"] = zipped(doc)
+    assert reg.exists("fits") is True and reg.info("fits") == PackageInfo(
+        NOW - 3 * DAY, 1, "active"
+    )
+    unpacked = []
+    real = registry.zlib.decompressobj
+
+    def decompressobj(**kwargs):
+        """Hand out the real thing, and record how much text each call to it gives."""
+        unzip = real(**kwargs)
+
+        class Recording:
+            """A decompressor that notes the size of what it unpacks."""
+
+            def decompress(self, data, max_length=0):
+                """Unpack, and note the size."""
+                text = unzip.decompress(data, max_length)
+                unpacked.append(len(text))
+                return text
+
+            def __getattr__(self, name):
+                """Everything else is the real decompressor's."""
+                return getattr(unzip, name)
+
+        return Recording()
+
+    monkeypatch.setattr(registry.zlib, "decompressobj", decompressobj)
+    monkeypatch.setattr(registry, "MAX_LISTING_TEXT", len(doc) - 1)
+    assert reg.exists("bomb") is True and reg.info("bomb") is None
+    assert unpacked == [len(doc) - 1] and reg._cache["bomb"] == [True, NOW]
 
 
 def test_identity_and_gzip_answers_read_the_same(pypi):
@@ -473,12 +544,26 @@ def test_ranged_answer_with_an_odd_content_range_counts_as_cut_off(pypi, content
     assert reg.exists("odd-and-old") is True and len(requests) == 3
 
 
-def test_cut_off_listing_without_upload_times_says_nothing(pypi):
-    """No upload time in the part that was read: nothing is known, and nothing more is asked."""
+def test_cut_off_listing_without_upload_times_is_read_whole(pypi):
+    """No upload time in the part that was read says nothing about the age. A first
+    file with a ``requires-python`` of 50 KB would hide a new package that way, so the
+    whole listing is asked for, as for a package that looks young."""
     reg, answers, requests = pypi
-    answers["odd"] = partial(b'{"files": [' + b'{"filename": "a.whl"},' * 5000, total=10**6)
-    assert reg.exists("odd") is True and reg.info("odd") is None
-    assert len(requests) == 1
+    padding = "".join(f"!={n}.{n * 7919 % 1009}," for n in range(9000))
+    file = {"filename": "pkg-1.whl", "requires-python": padding, "upload-time": ago(5)}
+    doc = json.dumps({"files": [file], "versions": ["1"]}).encode()
+    answers["padded"] = [partial(doc), zipped(doc)]
+    assert b"upload-time" not in gzip.decompress(gzip.compress(doc))[:LISTING_LIMIT]
+    assert reg.exists("padded") is True
+    assert reg.info("padded") == PackageInfo(NOW - 5 * DAY, 1, None)
+    assert [r.get_header("Range") for r in requests] == [f"bytes=0-{LISTING_LIMIT - 1}", None]
+    # A whole listing that has no upload times either: the package exists, and that is all.
+    bare = b'{"files": [' + b'{"filename": "a.whl"},' * 5000 + b'{"filename": "b.whl"}]}'
+    answers["bare"] = [partial(bare), zipped(bare)]
+    assert len(gzip.compress(bare)) < LISTING_LIMIT  # so make it a cut-off answer by hand
+    answers["bare"][0].headers.replace_header("Content-Range", "bytes 0-99/100000")
+    assert reg.exists("bare") is True and reg.info("bare") is None
+    assert names(requests[2:]) == ["bare", "bare"]
 
 
 def test_slow_answer_counts_as_unreachable(pypi, monkeypatch):
@@ -666,13 +751,23 @@ def test_batch_stores_facts_like_single_lookups(pypi):
         '{"pkg": [true, 9e12], "_meta": {"pkg": {"first": 5}}}',
         '{"pkg": [true, 9e12], "_meta": ["pkg", 5, 1]}',
         '{"pkg": [false, 9e12], "_meta": {"pkg": [5, 1, "active", 9e12]}}',
+        pytest.param('{"pkg": [true, %s]}' % ("9" * 400), id="time of 400 digits"),
+        pytest.param(
+            '{"pkg": [true, 9e12], "_meta": {"pkg": [5, 1, "active", %s]}}' % ("9" * 400),
+            id="facts with a time of 400 digits",
+        ),
+        pytest.param(
+            '{"pkg": [true, 9e12], "_meta": {"pkg": [%s, 1, "active", 9e12]}}' % ("9" * 400),
+            id="upload time of 400 digits",
+        ),
+        '{"pkg": [true, -Infinity], "_meta": {"pkg": [5, 1, "active", -Infinity]}}',
     ],
 )
 def test_damaged_cache_never_crashes_or_invents_facts(tmp_path, monkeypatch, content):
     """Whatever is in the file: no crash, and no facts that PyPI didn't give."""
     (tmp_path / "pypi.json").write_text(content, encoding="utf-8")
     monkeypatch.setattr(PyPIRegistry, "_query", lambda self, key: None)
-    reg = PyPIRegistry(tmp_path, now=NOW)
+    reg = PyPIRegistry(tmp_path, now=NOW + 0.5)  # a float, as the clock gives it
     reg.prefetch(["pkg", "other"])
     assert reg.exists("pkg") in (True, False, None)
     assert reg.info("pkg") is None
