@@ -11,7 +11,12 @@ import pytest
 from slopfence import indexes
 from slopfence.detectors import packages
 from slopfence.engine import Result, run
+from slopfence.listing import PackageInfo
 from slopfence.registry import OfflineRegistry
+
+DAY = 86400
+# "Now" in the tests of SLOP002, whose findings depend on the date: 2026-10-11 12:00 UTC.
+NOW = 1791720000
 
 
 class FakeRegistry:
@@ -41,6 +46,33 @@ class FakeBatchRegistry(FakeRegistry):
     def prefetch(self, names) -> None:
         """Record the batch; the answers still come from ``exists``."""
         self.batches.append(list(names))
+
+
+class FakeFactsRegistry(FakeRegistry):
+    """FakeRegistry that also knows what PyPI's file listing says about some packages."""
+
+    def __init__(self, existing: set[str], facts: dict[str, PackageInfo]) -> None:
+        """``facts`` maps a package to its facts. Such a package exists.
+
+        ``info_queries`` records which names ``info`` was asked about.
+        """
+        from slopfence.registry import normalize
+
+        super().__init__(existing | set(facts))
+        self.facts = {normalize(name): info for name, info in facts.items()}
+        self.info_queries: list[str] = []
+
+    def info(self, name: str) -> PackageInfo | None:
+        """The facts of a listed package. None for any other, like an established one."""
+        from slopfence.registry import normalize
+
+        self.info_queries.append(name)
+        return self.facts.get(normalize(name))
+
+
+def uploaded(days_ago: float, releases: int = 3, status: str | None = "active") -> PackageInfo:
+    """The facts of a package whose oldest file was uploaded ``days_ago`` days before ``NOW``."""
+    return PackageInfo(int(NOW - days_ago * DAY), releases, status)
 
 
 class DownRegistry:

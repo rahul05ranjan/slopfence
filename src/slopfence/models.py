@@ -22,6 +22,13 @@ class Rule:
     summary: str
 
 
+# SLOP002: a package counts as new for this many days after its first upload to PyPI.
+# The default of ``min-package-age``.
+NEW_PACKAGE_DAYS = 30
+# SLOP002 never reports a package whose oldest file is this many days old or more,
+# unless PyPI has quarantined it. Also the largest ``min-package-age``.
+YOUNG_PACKAGE_DAYS = 365
+
 RULES: dict[str, Rule] = {
     rule.id: rule
     for rule in [

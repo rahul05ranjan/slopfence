@@ -18,7 +18,7 @@ from slopfence.cli import main
 from slopfence.config import ignored_rules, load_config
 from slopfence.engine import run
 from slopfence.models import RULES, Finding, plural
-from slopfence.registry import OfflineRegistry, PyPIRegistry
+from slopfence.registry import Lookup, OfflineRegistry, PyPIRegistry
 from tests.conftest import FakeRegistry, git, git_init
 
 APP = '''\
@@ -1361,7 +1361,9 @@ def test_write_baseline_says_when_pypi_did_not_answer(project, capsys, monkeypat
     """PyPI out of reach, or no answer for one name only: its finding may be missing."""
     (project / "cache" / "slopfence" / "pypi.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
-        PyPIRegistry, "_query", lambda self, key: None if key in unanswered else key == "requests"
+        PyPIRegistry,
+        "_query",
+        lambda self, key: None if key in unanswered else Lookup(key == "requests"),
     )
     code, after = report(capsys, "--write-baseline", "base.json")
     assert code == 0
