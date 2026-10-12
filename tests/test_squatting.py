@@ -16,7 +16,7 @@ from slopfence.detectors.squatting import NEW, QUARANTINED, SINGLE_RELEASE, asse
 from slopfence.engine import SLOP002_NEEDS_SLOP001, run
 from slopfence.listing import PackageInfo
 from slopfence.models import RULES, Severity
-from slopfence.registry import OfflineRegistry, PyPIRegistry, normalize
+from slopfence.registry import Lookup, OfflineRegistry, PyPIRegistry, normalize
 from tests.conftest import DAY, NOW, FakeFactsRegistry, FakeRegistry, rule_lines, uploaded
 from tests.test_notebooks import jupyter
 
@@ -783,6 +783,31 @@ def test_baseline_does_not_hide_a_later_quarantine(write, check):
     held = later(uploaded(3, releases=1, status="quarantined"), 60)
     assert [f.subject for f in held.findings] == ["brand-new-lib quarantined"]
     assert held.baselined == []
+    # A year on there is no finding left. The entry is not called fixed: an answer
+    # from PyPI that is missing must never look like a fix.
+    aged = later(uploaded(3, releases=1), 400)
+    assert aged.findings == [] and aged.baselined == [] and aged.notes == []
+
+
+def test_one_request_per_package_and_one_finding_per_line(write, tmp_path, monkeypatch):
+    """The same new package in three places: PyPI is asked once, each place is reported."""
+    write("requirements.txt", "brand-new-lib\nBrand_New.Lib>=2\n")
+    write("docs/requirements.txt", "brand-new-lib\n")
+    asked = []
+
+    def query(self, key):
+        """Answer like PyPI for a package that is three days old."""
+        asked.append(key)
+        return Lookup(True, uploaded(3, releases=2))
+
+    monkeypatch.setattr(PyPIRegistry, "_query", query)
+    result = run([tmp_path], tmp_path, PyPIRegistry(tmp_path / "cache", now=NOW), now=NOW)
+    assert findings(result) == [
+        ("SLOP002", "docs/requirements.txt", 1),
+        ("SLOP002", "requirements.txt", 1),
+        ("SLOP002", "requirements.txt", 2),
+    ]
+    assert asked == ["brand-new-lib"]
 
 
 # --- Time ----------------------------------------------------------------------------------

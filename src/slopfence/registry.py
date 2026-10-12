@@ -416,7 +416,8 @@ class PyPIRegistry:
         never reports a package that old. A second request, for the whole listing,
         is only sent when the listing is longer and every file seen is young. Only a
         whole listing can show that a package is young (see
-        ``listing.seen_upload_times``).
+        ``listing.seen_upload_times``). The status and the versions come after the
+        files, so they are only read from a whole listing too.
 
         This runs on worker threads: it reads ``self._now`` and changes nothing but
         ``self._unreachable``.
