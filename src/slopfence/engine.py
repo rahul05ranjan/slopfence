@@ -12,14 +12,16 @@ from slopfence import diff as diffmod
 from slopfence.analysis import FileSummary, Options, Task, analyze_files
 from slopfence.config import ignored_rules, is_excluded, selected_rules
 from slopfence.detectors import FILE_DETECTORS
+from slopfence.detectors.dependency import NOTEBOOK_SUFFIX, Kind, kind_of
 from slopfence.detectors.duplicates import check_duplicates
+from slopfence.detectors.notebooks import MAX_BYTES as MAX_NOTEBOOK_BYTES
 from slopfence.detectors.packages import (
     LOCK_FILES,
     PACKAGE_RULES,
     PackageChecker,
     build_index,
 )
-from slopfence.models import RULES, Finding, Severity
+from slopfence.models import RULES, Finding, Severity, plural
 from slopfence.registry import Registry
 from slopfence.source import relative_path as _rel_to
 
@@ -42,37 +44,45 @@ EXCLUDED_DIRS = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    # Jupyter's autosaved copies of notebooks.
+    ".ipynb_checkpoints",
 }
 
 
-def _is_dependency_file(path: Path) -> bool:
-    name = path.name
-    return name == "pyproject.toml" or (name.startswith("requirements") and name.endswith(".txt"))
+def discover_all(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Path], list[Path]]:
+    """Return (python files, dependency files, lock files) under the given paths.
 
-
-def discover_all(paths: Sequence[Path]) -> tuple[list[Path], list[Path], list[Path]]:
-    """Return (python files, dependency files, lock files) under the given paths."""
+    ``setup.py`` is both a Python file and a dependency file. ``root`` is the project
+    root: whether a file is a dependency file can depend on its folder inside the
+    project (``requirements/base.txt``, see ``dependency.kind_of``).
+    """
     py_files: list[Path] = []
     dep_files: list[Path] = []
     lock_files: list[Path] = []
+
+    def add(path: Path) -> None:
+        """Put one file on the lists it belongs to."""
+        if path.suffix == ".py":
+            py_files.append(path)
+        if kind_of(path, root) is not None:
+            dep_files.append(path)
+        elif path.name in LOCK_FILES:
+            lock_files.append(path)
+
     for path in paths:
         path = path.resolve()
         if path.is_file():
-            if path.suffix == ".py":
-                py_files.append(path)
-            elif _is_dependency_file(path):
-                dep_files.append(path)
-            elif path.name in LOCK_FILES:
-                lock_files.append(path)
+            add(path)
             continue
         for dirpath, dirnames, filenames in os.walk(path):
             # Prune excluded trees (.venv, node_modules, .git...) and nested checkouts
             # before descending. A sub-folder that holds a .git file or folder is a
             # worktree, clone or submodule: another copy of a project, not this one.
             # Its files must not count as this project's code (SLOP030 would
-            # double-report; SLOP001 would treat its modules as local, see #58). The
-            # path passed on the command line is the walk root and is never pruned, so
-            # an explicitly named checkout is still checked.
+            # double-report; SLOP001 would treat its modules as local and its
+            # dependency files as this project's, see #58). The path passed on the
+            # command line is the walk root and is never pruned, so an explicitly
+            # named checkout is still checked.
             dirnames[:] = [
                 d
                 for d in dirnames
@@ -81,13 +91,7 @@ def discover_all(paths: Sequence[Path]) -> tuple[list[Path], list[Path], list[Pa
                 and not (Path(dirpath, d) / ".git").exists()
             ]
             for filename in filenames:
-                child = Path(dirpath, filename)
-                if child.suffix == ".py":
-                    py_files.append(child)
-                elif _is_dependency_file(child):
-                    dep_files.append(child)
-                elif filename in LOCK_FILES:
-                    lock_files.append(child)
+                add(Path(dirpath, filename))
     return sorted(set(py_files)), sorted(set(dep_files)), sorted(set(lock_files))
 
 
@@ -96,6 +100,27 @@ def _not_excluded(files: list[Path], root: Path, exclude: Sequence[str]) -> list
     if not exclude:
         return files  # the usual case, and no relative path has to be worked out
     return [p for p in files if not is_excluded(_rel_to(p, root), exclude)]
+
+
+def _dependency_files_to_read(
+    project: list[Path], checked: list[Path], root: Path, exclude: Sequence[str], imports: bool
+) -> list[Path]:
+    """The dependency files that SLOP001 reads: the checked ones, and more of the project.
+
+    Every file of the project but a notebook is read, wherever it is: a private
+    index, or the name of one of the project's own packages, counts for the whole
+    project. A notebook says less and costs more. It is read when it is checked.
+    With ``imports`` the others are read too, for the packages they install, unless
+    they are excluded.
+    """
+    notebooks = _not_excluded(project, root, exclude) if imports else []
+    return sorted(
+        {
+            *checked,
+            *(p for p in project if p.suffix != NOTEBOOK_SUFFIX),
+            *(p for p in notebooks if p.suffix == NOTEBOOK_SUFFIX),
+        }
+    )
 
 
 @dataclass
@@ -113,6 +138,17 @@ class Result:
     # run was offline, the environment has a private index, or PyPI did not answer.
     # Their findings may be incomplete.
     unchecked_rules: list[str] = field(default_factory=list)
+
+
+# How many file names a note lists before it only counts the rest.
+NOTE_FILE_LIMIT = 3
+
+
+def _listed(files: Sequence[str]) -> str:
+    """File names for a note: the first few, then how many more there are."""
+    shown = ", ".join(files[:NOTE_FILE_LIMIT])
+    more = len(files) - NOTE_FILE_LIMIT
+    return f"{shown} and {plural(more, 'more file')}" if more > 0 else shown
 
 
 def _per_file_matcher(
@@ -224,6 +260,7 @@ def run(
     per_file_ignores: Mapping[str, Iterable[str]] | None = None,
     severity: Mapping[str, Severity] | None = None,
     baseline: baselinemod.Baseline | None = None,
+    inherit_index: bool = True,
 ) -> Result:
     """Check ``paths`` and return the findings.
 
@@ -233,6 +270,11 @@ def run(
 
     ``private_index`` says where the environment configures a non-PyPI package
     index (see ``indexes.find_private_index``); SLOP001 then makes no lookups.
+
+    A private index in a project file covers that file. With ``inherit_index`` it also
+    covers the dependency files that name no index of their own (``setup.py``,
+    ``setup.cfg``, ``Pipfile``, notebooks, and requirements files that v0.2 did not
+    read), unless the file that names it is excluded.
 
     Files are parsed and checked in up to ``jobs`` worker processes when there are
     enough of them (see ``analysis.analyze_files``). The result does not depend on
@@ -246,19 +288,19 @@ def run(
     rules = selected_rules(select, ignore)
     root = root.resolve()
 
-    found_py, found_deps, found_locks = discover_all(paths)
+    found_py, found_deps, found_locks = discover_all(paths, root)
     # Excluded files are not checked, but still count as project modules below.
     py_files = _not_excluded(found_py, root, exclude)
     dep_files = _not_excluded(found_deps, root, exclude)
 
-    # SLOP030 and SLOP001's import check look at the whole project, not just the checked
-    # paths: when pre-commit passes only changed files, their functions and imports are
-    # still compared with the rest.
+    # SLOP030 and SLOP001 look at the whole project, not just the checked paths. When
+    # pre-commit passes only changed files, their functions and imports are still
+    # compared with the rest. And a private index, or the name of one of the project's
+    # own packages, counts wherever in the project it is written.
     project = (found_py, found_deps, found_locks)
     whole_project_given = any(Path(p).resolve() == root for p in paths)
-    needs_project = "SLOP030" in rules or ("SLOP001" in rules and check_imports)
-    if needs_project and not whole_project_given:
-        project = discover_all([root])
+    if rules & {"SLOP001", "SLOP030"} and not whole_project_given:
+        project = discover_all([root], root)
 
     tasks: list[Task] = [(str(p), True) for p in py_files]
     if "SLOP030" in rules and not whole_project_given:
@@ -282,20 +324,35 @@ def run(
     switched_off = _per_file_matcher(per_file_ignores or {})
     result.parse_errors = [s.rel for s in checked if not s.parsed]
     sources = [s for s in checked if s.parsed]
-    result.files_checked = len(sources) + len(dep_files)
+    # setup.py is a Python file and a dependency file: it is counted once.
+    result.files_checked = len(sources) + sum(p.suffix != ".py" for p in dep_files)
 
     findings = [f for s in sources for f in s.findings]
 
     if "SLOP001" in rules:
-        index = build_index(root, *project) if check_imports else build_index(root, [], dep_files)
+        to_read = _dependency_files_to_read(project[1], dep_files, root, exclude, check_imports)
+        index = build_index(root, project[0], to_read, project[2], imports=check_imports)
         checker = PackageChecker(
-            index, registry, known_packages=known_packages, private_index=private_index
+            index,
+            registry,
+            known_packages=known_packages,
+            private_index=private_index,
+            # A private index in an excluded file is the user's to leave out.
+            inherited_from=[
+                rel
+                for rel in index.install_index_files
+                if inherit_index and not is_excluded(rel, exclude)
+            ],
         )
         # The names of these files, and of no other file, may go to PyPI. A file where
         # per-file-ignores switch SLOP001 off is left out here, where the two collections
-        # are made: the batch below and both checks are fed from them.
+        # are made: the batch below and both checks are fed from them. So is a file
+        # outside the diff: its findings would be dropped.
         checked_deps = {
-            rel for p in dep_files if not switched_off("SLOP001", rel := _rel_to(p, root))
+            rel
+            for p in dep_files
+            if not switched_off("SLOP001", rel := _rel_to(p, root))
+            and (changed is None or rel in changed)
         }
         # Imports are only sent to PyPI when the user opts in (they can reveal private
         # names), and never for files outside the diff. Nor is an import under an ignore
@@ -307,6 +364,16 @@ def run(
             and (changed is None or s.rel in changed)
             and not switched_off("SLOP001", s.rel)
         }
+        # The imports in the code cells of checked notebooks, under the same opt-in.
+        # Ignore comments were applied when the cells were read. Only notebooks: a
+        # setup.py is a dependency file too, and its imports are already in the list.
+        imports.update(
+            {
+                f.rel: f.imports
+                for f in index.files
+                if check_imports and f.kind is Kind.NOTEBOOK and f.rel in checked_deps
+            }
+        )
         imported = [name for found in imports.values() for name, _, _ in found]
         # One batch with every name the two checks below will ask about.
         checker.prefetch(checked_deps, imported)
@@ -318,10 +385,21 @@ def run(
                 "index only mirrors PyPI, set detect-private-index = false."
             )
         elif check_imports and checker.imports_may_be_private:
-            files = ", ".join(index.private_index_files)
             result.notes.append(
-                f"SLOP001 didn't look up imports on PyPI: {files} uses a private package "
-                "index, so unknown imports may be private packages."
+                f"SLOP001 didn't look up imports on PyPI: {_listed(index.private_index_files)} "
+                "uses a private package index, so unknown imports may be private packages."
+            )
+        if skipped := checker.inherited_files(checked_deps):
+            result.notes.append(
+                f"SLOP001 didn't look up the dependencies in {_listed(sorted(skipped))}: a "
+                f"private package index is set in {_listed(checker.inherited_from)}, so "
+                "names missing from PyPI may be private packages. If that index only "
+                "mirrors PyPI, set detect-private-index = false."
+            )
+        if too_large := sorted(f.rel for f in index.files if f.too_large and f.rel in checked_deps):
+            result.notes.append(
+                f"SLOP001 didn't read {_listed(too_large)}: a notebook larger than "
+                f"{MAX_NOTEBOOK_BYTES // 2**20} MB is skipped."
             )
         for rel, found in imports.items():
             findings.extend(checker.check_imports(rel, found))

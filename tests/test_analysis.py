@@ -141,7 +141,9 @@ def test_project_is_listed_once_and_broken_files_are_read_once(write, tmp_path, 
     walks, batches = [], []
     real_discover, real_analyze = engine.discover_all, engine.analyze_files
     monkeypatch.setattr(
-        engine, "discover_all", lambda paths: walks.append(list(paths)) or real_discover(paths)
+        engine,
+        "discover_all",
+        lambda paths, root: walks.append(list(paths)) or real_discover(paths, root),
     )
     monkeypatch.setattr(
         engine, "analyze_files", lambda tasks, *a: batches.append(tasks) or real_analyze(tasks, *a)

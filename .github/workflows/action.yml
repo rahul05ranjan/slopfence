@@ -58,6 +58,9 @@ jobs:
           printf '# I hope this helps! \xe2\x9c\x85 caf\xc3\xa9\n' >> src/app.py
           printf 'flask-jwt-simple-auth\n' >> requirements.txt
           printf 'from unittest.mock import Mock\n\n\ndef test_user():\n    user = Mock()\n    user.name = "x"\n    assert user.name == "x"\n' > tests/test_app.py
+          # A notebook saved on one line: the finding must still have a place in the file.
+          mkdir -p nb
+          printf '%s\n' '{"cells":[{"cell_type":"code","execution_count":null,"metadata":{},"outputs":[],"source":["%pip install flask-jwt-simple-auth"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}' > nb/demo.ipynb
           git add -A && git commit -qm feature
 
       - name: "diff: none (full scan, SARIF)"
@@ -65,7 +68,7 @@ jobs:
         continue-on-error: true
         uses: ./slopfence-src
         with:
-          paths: src tests requirements.txt
+          paths: src tests requirements.txt nb
           diff: none
           sarif-file: full.sarif
 
@@ -74,7 +77,7 @@ jobs:
         continue-on-error: true
         uses: ./slopfence-src
         with:
-          paths: src tests requirements.txt
+          paths: src tests requirements.txt nb
           diff: origin/main
           sarif-file: ref.sarif
 
@@ -83,7 +86,7 @@ jobs:
         continue-on-error: true
         uses: ./slopfence-src
         with:
-          paths: src tests requirements.txt
+          paths: src tests requirements.txt nb
           sarif-file: auto.sarif
 
       - name: Clean project passes
@@ -160,7 +163,12 @@ jobs:
                   for r in doc["runs"][0]["results"]
               }
 
-          new = {("SLOP001", "requirements.txt"), ("SLOP020", "tests/test_app.py"), ("SLOP051", "src/app.py")}
+          new = {
+              ("SLOP001", "requirements.txt"),
+              ("SLOP001", "nb/demo.ipynb"),
+              ("SLOP020", "tests/test_app.py"),
+              ("SLOP051", "src/app.py"),
+          }
           old = ("SLOP010", "src/app.py")
 
           expect(os.environ["FULL"] == "failure", "full scan fails the step")

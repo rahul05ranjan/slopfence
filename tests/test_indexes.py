@@ -19,8 +19,12 @@ PRIVATE = "https://user:secret@pkgs.corp.example/simple"
     ("url", "public"),
     [
         ("https://pypi.org/simple", True),
-        ("https://test.pypi.org/simple/", True),
+        ("https://PyPI.org/simple/", True),
         ("https://files.pythonhosted.org/packages", True),
+        ("https://pypi.python.org/simple", True),
+        # TestPyPI is another index with other packages, and so is its file host.
+        ("https://test.pypi.org/simple/", False),
+        ("https://test-files.pythonhosted.org/packages", False),
         ("https://pkgs.corp.example/simple", False),
         ("https://corp.example/pypi.org/simple", False),
         ("https://pypi.org.corp.example/simple", False),
@@ -29,7 +33,7 @@ PRIVATE = "https://user:secret@pkgs.corp.example/simple"
     ],
 )
 def test_is_public_index(url, public):
-    """Only PyPI's own hosts are public, matched by host rather than substring."""
+    """Only PyPI's own hosts are public, matched by the whole host and never by a part of it."""
     assert is_public_index(url) is public
 
 

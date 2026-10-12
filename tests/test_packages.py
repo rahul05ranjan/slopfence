@@ -1,7 +1,7 @@
 import pytest
 
 from slopfence.detectors.packages import parse_dependency_file
-from tests.conftest import FakeRegistry, rule_lines
+from tests.conftest import DownRegistry, FakeRegistry, rule_lines
 
 
 def test_requirements_nonexistent_dependency(write, check):
@@ -23,6 +23,8 @@ def test_requirements_nonexistent_dependency(write, check):
 
 
 def test_pyproject_dependencies(write, check, tmp_path):
+    """PEP 621 dependencies, optional dependencies and dependency groups are read. The
+    project's own name is not one of them."""
     write(
         "pyproject.toml",
         """
@@ -37,13 +39,16 @@ def test_pyproject_dependencies(write, check, tmp_path):
         lint = ["ruff", {include-group = "dev"}]
         """,
     )
-    deps = [d.name for d in parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)]
+    declared = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    deps = [d.name for d in declared.dependencies]
     assert deps == ["requests", "totally-fake-pkg", "pytest", "ruff"]
     result = check("SLOP001", registry=FakeRegistry({"requests", "pytest", "ruff"}))
     assert rule_lines(result, "SLOP001") == [3]
 
 
 def test_poetry_dependencies(tmp_path, write):
+    """Poetry tables are read. ``python`` is not a package, and a path dependency is
+    declared but not looked up."""
     write(
         "pyproject.toml",
         """
@@ -56,7 +61,7 @@ def test_poetry_dependencies(tmp_path, write):
         pytest = "^8"
         """,
     )
-    deps = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    deps = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path).dependencies
     # Path dependencies stay declared (so `import mylib` isn't flagged) but aren't looked up.
     assert [(d.name, d.line, d.validate) for d in deps] == [
         ("httpx", 3, True),
@@ -100,14 +105,9 @@ def test_installed_and_declared_imports_not_flagged(write, check):
 
 def test_unreachable_registry_never_flags(write, check):
     """If PyPI can't be reached, nothing is reported as missing."""
-
-    class Down:
-        def exists(self, name):
-            return None
-
     write("requirements.txt", "anything-at-all\n")
     write("src/app.py", "import nonexistent_xyz\n")
-    assert check("SLOP001", registry=Down(), check_imports=True).findings == []
+    assert check("SLOP001", registry=DownRegistry(), check_imports=True).findings == []
 
 
 def test_imports_are_not_looked_up_by_default(write, check):
@@ -218,7 +218,7 @@ def test_project_wide_private_index(tmp_path, write, config, private):
         '[project]\nname = "demo"\ndependencies = ["corp-auth"]\n\n'
         '[tool.poetry.dependencies]\ncorp-billing = "^1"\n\n' + config,
     )
-    deps = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    deps = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path).dependencies
     assert {d.name: d.validate for d in deps} == {
         "corp-auth": not private,
         "corp-billing": not private,
@@ -265,6 +265,7 @@ def test_pyproject_line_is_the_dependency_entry(write, check):
 
 
 def test_pyproject_external_sources(tmp_path, write):
+    """A dependency from a URL, git or a named source is declared but not looked up."""
     write(
         "pyproject.toml",
         """
@@ -280,7 +281,7 @@ def test_pyproject_external_sources(tmp_path, write):
         private-dep = { version = "^1", source = "corp" }
         """,
     )
-    deps = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path)
+    deps = parse_dependency_file(tmp_path / "pyproject.toml", tmp_path).dependencies
     assert {d.name: d.validate for d in deps} == {
         "corp-pkg": False,
         "uv-pkg": False,

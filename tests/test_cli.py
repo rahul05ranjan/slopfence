@@ -144,13 +144,14 @@ def test_sarif_uri_is_percent_encoded(tmp_path):
 
 
 def test_excluded_directories_are_not_walked(tmp_path):
+    """Virtual environments, node_modules and egg-info folders are never walked."""
     from slopfence.engine import discover_all
 
     (tmp_path / "app.py").write_text("")
     for d in [".venv/lib", "node_modules/x", "pkg.egg-info"]:
         (tmp_path / d).mkdir(parents=True)
         (tmp_path / d / "m.py").write_text("")
-    py_files, _, _ = discover_all([tmp_path])
+    py_files, _, _ = discover_all([tmp_path], tmp_path)
     assert [p.name for p in py_files] == ["app.py"]
 
 

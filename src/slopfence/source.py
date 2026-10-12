@@ -56,6 +56,14 @@ def child_statements(node: ast.AST) -> list[ast.AST]:
     return children(node, _STATEMENT_HOLDERS)
 
 
+def char_column(line: str, byte_offset: int) -> int:
+    """The 0-based character column of a UTF-8 byte offset in ``line``.
+
+    ``ast`` counts columns in bytes. Editors, reports and git count characters.
+    """
+    return len(line.encode()[:byte_offset].decode("utf-8", "replace"))
+
+
 @dataclass
 class TextSpan:
     """A line of comment or docstring text with its location (1-based line and column)."""
@@ -126,8 +134,7 @@ class SourceFile:
                 if not text.strip():
                     continue
                 if lineno == const.lineno:
-                    # ast columns are UTF-8 byte offsets; convert to characters.
-                    col = len(text.encode()[: const.col_offset].decode("utf-8", "replace"))
+                    col = char_column(text, const.col_offset)
                 else:
                     col = len(text) - len(text.lstrip())
                 # Treat escapes like \n as word breaks so "Intro\nI hope this helps" matches.
@@ -176,6 +183,16 @@ def load(path: Path, root: Path, comments: bool = True) -> SourceFile | None:
     text = read_source(path)
     if text is None:
         return None
+    return parse(text, path, relative_path(path, root), comments)
+
+
+def parse(text: str, path: Path, rel: str, comments: bool = True) -> SourceFile | None:
+    """Parse Python source that is already read. Returns None if it is not valid Python.
+
+    ``path`` and ``rel`` say where the source comes from. It need not be a whole
+    file: the code cell of a notebook is parsed with this too. ``comments`` is as
+    in ``load``.
+    """
     try:
         # Python warns about some valid code (an invalid escape sequence, for one).
         # What happens then depends on the warning filters of the process: under
@@ -187,7 +204,7 @@ def load(path: Path, root: Path, comments: bool = True) -> SourceFile | None:
     except (SyntaxError, ValueError):
         return None
 
-    src = SourceFile(path=path, rel=relative_path(path, root), text=text, tree=tree)
+    src = SourceFile(path=path, rel=rel, text=text, tree=tree)
     if not comments or "#" not in text:
         return src  # nothing to tokenize for
     try:

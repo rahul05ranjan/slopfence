@@ -80,9 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-imports",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="also look up unknown imports in source code on PyPI; this sends their names to "
-        "pypi.org (default: off, only dependency files are checked; --no-check-imports "
-        "overrides config)",
+        help="also look up unknown imports in source code and notebooks on PyPI; this sends "
+        "their names to pypi.org (default: off, only dependency files are checked; "
+        "--no-check-imports overrides config)",
     )
     parser.add_argument(
         "--detect-private-index",
@@ -90,7 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="skip PyPI lookups when pip or uv is configured with a non-PyPI index "
         "(PIP_INDEX_URL, pip.conf, uv.toml...), since missing packages may be private "
-        "(default: on; --no-detect-private-index if that index only mirrors PyPI)",
+        "(default: on; --no-detect-private-index if that index only mirrors PyPI: a "
+        "private index in a project file then no longer covers the other dependency "
+        "files, but still stops import lookups)",
     )
     parser.add_argument(
         "--fail-on",
@@ -321,6 +323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             per_file_ignores=config.per_file_ignores,
             severity=config.severity,
             baseline=baseline,
+            inherit_index=detect_private_index,
         )
     except KeyboardInterrupt:
         # No report and no cache file: the run did not finish.

@@ -1,0 +1,1854 @@
+"""SLOP001 in setup.cfg, setup.py, Pipfile and more requirements file names (#53)."""
+
+import codecs
+import configparser
+import json
+import random
+import time
+from pathlib import PurePosixPath
+
+import pytest
+
+from slopfence.cli import main
+from slopfence.detectors.dependency import Kind, dependency_kind, kind_of, parse_requirement
+from slopfence.detectors.packages import parse_dependency_file
+from slopfence.detectors.setuptools_files import _cfg_lines
+from slopfence.engine import discover_all, run
+from slopfence.registry import OfflineRegistry, PyPIRegistry
+from tests.conftest import DownRegistry, FakeRegistry
+
+PRIVATE = "https://user:secret@pkgs.corp.example/simple"
+INDEX = f"--extra-index-url {PRIVATE}\n"
+
+
+def found(result):
+    """(path, line, column) of every finding."""
+    return [(f.path, f.line, f.col) for f in result.findings]
+
+
+def brief(path, root):
+    """(name, line, validate) of each dependency the file declares."""
+    return [(d.name, d.line, d.validate) for d in parse_dependency_file(path, root).dependencies]
+
+
+# --- Which files count ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements_test.txt",
+        "requirements3.txt",
+        "dev-requirements.txt",
+        "linters.requirements.txt",
+        "requirements.in",
+        "dev-requirements.in",
+        "constraints.txt",
+        "constraints-3.8.txt",
+        "package_constraints.txt",
+        "requirements/base.txt",
+        "requirements/dev.in",
+        "tests/requirements/py3.txt",
+        "requirements/static/ci/py3.10/linux.in",
+        # A word that only holds a package manager's name is not that package manager.
+        "support-requirements.txt",
+        "requirements-snapshot.txt",
+        # A list for another package manager: only its index options are read.
+        "apt-requirements.txt",
+        "requirements/system/ubuntu/apt-packages.txt",
+    ],
+)
+def test_requirements_file_names(name):
+    """Names that pip-tools, Django-style layouts and constraints files use."""
+    assert dependency_kind(PurePosixPath(name)) is Kind.REQUIREMENTS
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "requirements.md",
+        "requirements.yml",
+        "requirements.txt.template",
+        "requirements.lock",
+        "REQUIREMENTS.txt",
+        "requires.txt",
+        "README.txt",
+        "my-requirements-notes.txt",
+        "MANIFEST.in",
+        "proctoringrequirements/email/body.txt",
+        # A build file of another tool in a folder that happens to be called requirements.
+        "tests/requirements/CMakeLists.txt",
+        "Pipfile.lock",
+        "my_setup.py",
+        "setup.cfg.bak",
+    ],
+)
+def test_names_that_are_not_dependency_files(name):
+    """Docs, templates, lock files and other tools' build files are left alone."""
+    assert dependency_kind(PurePosixPath(name)) is None
+
+
+OTHER_MANAGERS = [
+    "apt-requirements.txt",
+    "requirements-conda.txt",
+    "requirements_apt.txt",
+    "requirements/system/ubuntu/apt-packages.txt",
+    "requirements-cran.txt",
+    "choco-requirements.txt",
+    "requirements/snap.txt",
+]
+
+
+@pytest.mark.parametrize("name", OTHER_MANAGERS)
+def test_the_packages_of_a_list_for_another_package_manager_are_not_read(
+    write, check, tmp_path, name
+):
+    """``apt-requirements.txt`` lists apt packages. They are not PyPI names, so none
+    is declared, sent or reported."""
+    path = write(name, "libxml2-dev\nbuild-essential>=12\n")
+    write("constraints.txt", "ghost-pin==1.0\n")
+    assert parse_dependency_file(path, tmp_path).dependencies == []
+    registry = FakeRegistry(set())
+    assert found(check("SLOP001", registry=registry)) == [("constraints.txt", 1, 1)]
+    assert registry.queries == ["ghost-pin"]
+
+
+@pytest.mark.parametrize("name", OTHER_MANAGERS)
+def test_an_index_in_a_list_for_another_package_manager_still_counts(
+    write, check, name, not_installed
+):
+    """A file with an index option is a pip file, whatever its name says. v0.2 read
+    ``requirements-conda.txt`` and kept the project's names on the machine: the files
+    that inherit are not looked up, and neither are imports."""
+    write(name, INDEX + "corp-auth==1.0\n")
+    write("setup.py", "from setuptools import setup\nsetup(install_requires=['corp-core'])\n")
+    write("src/app.py", "import corp_models\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert result.findings == [] and registry.queries == []
+    assert f"{name} uses a private package index" in result.notes[0]
+    assert f"a private package index is set in {name}" in result.notes[1]
+
+
+def test_other_kinds():
+    """setup.py, setup.cfg, Pipfile and pyproject.toml are known by name, in any folder."""
+    names = ["a/setup.py", "setup.cfg", "b/c/Pipfile", "pyproject.toml"]
+    assert [dependency_kind(PurePosixPath(name)) for name in names] == [
+        Kind.SETUP_PY,
+        Kind.SETUP_CFG,
+        Kind.PIPFILE,
+        Kind.PYPROJECT,
+    ]
+
+
+def test_discovery(write, tmp_path):
+    """setup.py is a Python file and a dependency file, and a ``requirements`` folder
+    above the project doesn't count."""
+    # Resolved, as the paths that come back are: a temporary folder can be a link.
+    root = (tmp_path / "requirements" / "app").resolve()
+    for rel in [
+        "setup.py",
+        "setup.cfg",
+        "Pipfile",
+        "notes.txt",
+        "requirements/base.txt",
+        "uv.lock",
+    ]:
+        write(f"requirements/app/{rel}", "")
+    py, deps, locks = discover_all([root], root)
+    assert [p.name for p in py] == ["setup.py"]
+    assert sorted(p.relative_to(root).as_posix() for p in deps) == [
+        "Pipfile",
+        "requirements/base.txt",
+        "setup.cfg",
+        "setup.py",
+    ]
+    assert [p.name for p in locks] == ["uv.lock"]
+    # Explicit files, as pre-commit passes them.
+    assert discover_all([root / "notes.txt", root / "setup.cfg"], root)[1] == [root / "setup.cfg"]
+    # A file outside the project is judged by its name alone.
+    assert kind_of(write("elsewhere/requirements/notes.txt", ""), root) is None
+    assert kind_of(write("elsewhere/requirements.txt", ""), root) is Kind.REQUIREMENTS
+
+
+# --- Requirement strings ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ("requests", ("requests", False, True)),
+        ("  requests  ", ("requests", False, True)),
+        ("Flask[async] >= 2 ; python_version < '3.11'", ("Flask", False, False)),
+        ("celery[redis]", ("celery", False, False)),
+        ("zope.interface (>=5.0)", ("zope.interface", False, False)),
+        ("corp-lib @ https://example.com/corp.whl", ("corp-lib", True, False)),
+        ("pkg===1.0.custom", ("pkg", False, False)),
+        ("templated==${VERSION}", ("templated", False, False)),
+        ("Django>={{ django_version }}", ("Django", False, False)),
+        # Packages whose names end like a file.
+        ("discord.py", ("discord.py", False, True)),
+        ("ruamel.yaml>=0.17", ("ruamel.yaml", False, False)),
+    ],
+)
+def test_requirement_strings(spec, expected):
+    """A requirement gives its name, whether it is a direct reference, and whether it
+    is the name alone."""
+    assert parse_requirement(spec) == expected
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "https://example.com/pkg-1.0.whl",
+        "./local/dir",
+        "this is prose",
+        "typo = 1.0",
+        "2>&1",
+        "f80db442347ca0dd7d7ca368405ffeee",
+        "python>=3.9",
+        "",
+        # A call in a CMake file is not a requirement with a bracketed version.
+        "cmake_minimum_required(VERSION 3.16)",
+        "add_test(NAME requires_clause COMMAND requires_clause)",
+        # File names.
+        "mypkg-1.0-py3-none-any.whl",
+        "vendor.tar.gz",
+        "requirements-dev.txt",
+        "base.in",
+        # Numbers, dates and addresses.
+        "2024-01-01",
+        "10.0.0.1",
+        "3.14",
+    ],
+)
+def test_strings_that_are_not_requirements(spec):
+    """URLs, paths, prose, calls, file names, checksums and numbers give no name."""
+    assert parse_requirement(spec) is None
+
+
+# --- Requirements files -----------------------------------------------------------------
+
+
+def test_new_requirements_names_found_and_missing(write, check):
+    """.in files, constraints and requirements/ folders are checked like requirements.txt."""
+    write("requirements/dev.in", "requests\nghost-dev  # a comment\n")
+    write("constraints.txt", "requests==2.31\nghost-pin==1.0\n")
+    write("dev-requirements.txt", "ghost-tool>=1  # slopfence: ignore\n")
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("constraints.txt", 2, 1), ("requirements/dev.in", 2, 1)]
+    assert [f.subject for f in result.findings] == ["ghost-pin", "ghost-dev"]
+    assert "ghost-tool" not in registry.queries  # an ignore comment: never sent
+    assert result.files_checked == 3 and result.notes == []
+
+
+@pytest.mark.parametrize("name", ["requirements/dev.in", "constraints.txt", "dev-requirements.txt"])
+def test_new_requirements_names_with_their_own_private_index(write, check, name):
+    """An index in the file itself makes its packages private, as in requirements.txt."""
+    write(name, INDEX + "corp-lib==1.0\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert result.notes == []  # the file says so itself: nothing to explain
+
+
+def test_requirement_lines_must_be_requirements(tmp_path, write):
+    """Options, URLs, templating and broken lines never give a name to look up."""
+    path = write(
+        "requirements.txt",
+        """
+        requests>=2.31
+        hashed==1.0 \\
+            --hash=sha256:abc
+        opt-pkg>=1 --global-option="--no-user-cfg"
+        Django>={{ django_version }}
+        {% if use_x %}
+        git+https://github.com/org/repo.git#egg=from-git
+        direct @ https://example.com/d.whl
+        typo = 1.0
+        src/local-package
+        python >= 3.9
+        mypkg-1.0-py3-none-any.whl
+        """,
+    )
+    assert brief(path, tmp_path) == [
+        ("requests", 1, True),
+        ("hashed", 2, True),
+        ("opt-pkg", 4, True),
+        ("Django", 5, True),
+        ("from-git", 7, False),
+        ("direct", 8, False),
+    ]
+
+
+SPACES = " " * 5000
+LONG = [
+    # Not a requirement: every way to cut the line up is tried before it is turned down.
+    ("requirements.txt", f"requests\nflask{SPACES}extra words\n"),
+    ("constraints.txt", f"requests==2.31\nflask{SPACES}> =1\n"),
+    # No per-requirement option after the white space.
+    ("requirements.txt", "requests\nflask" + "\t" * 100_000 + "-x\n"),
+    ("setup.cfg", f"[options]\ninstall_requires =\n    requests\n    flask{SPACES}extra words\n"),
+    # A line of a TOML string that starts like a table header.
+    (
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["requests"]\n'
+        f'description = """\n[{SPACES}x\n"""\n',
+    ),
+    ("Pipfile", f'[packages]\nrequests = "*"\n\n[scripts]\nrun = """\n[[{SPACES}x\n"""\n'),
+]
+
+
+@pytest.mark.parametrize(("name", "text"), LONG, ids=[f"{n} {i}" for i, (n, _) in enumerate(LONG)])
+def test_a_long_run_of_white_space_is_read_in_no_time(tmp_path, name, text):
+    """A line with thousands of spaces is walked once, not once per space. When two
+    parts of a pattern could match the same spaces, a file of a few kilobytes took
+    minutes: this test would then run for as long."""
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    start = time.perf_counter()
+    declared = parse_dependency_file(path, tmp_path).dependencies
+    assert time.perf_counter() - start < 5
+    assert [dep.name for dep in declared] == ["requests"]
+
+
+def test_a_long_setup_cfg_line_is_split_in_no_time():
+    """The option name of a setup.cfg line ends at the first ``=`` or ``:``, however
+    much white space the line holds before it."""
+    line = "install" + " " * 100_000 + "requires = requests"
+    start = time.perf_counter()
+    lines = list(_cfg_lines(f"[options]\n{line}\n"))
+    assert time.perf_counter() - start < 5
+    assert lines == [("options", "install" + " " * 100_000 + "requires", (2, "requests", True))]
+
+
+def test_prose_named_like_requirements_is_skipped(write, check):
+    """A document that is only named like a requirements file yields nothing."""
+    write(
+        "docs/constraints.txt",
+        """
+        Constraints
+        ===========
+
+        This document describes the database constraints.
+        Use them with care.
+        They are checked on save.
+        requests
+        """,
+    )
+    write("output-requirements.txt", "f80db442347ca0dd7d7ca368405ffeee\n")
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == []
+    assert registry.queries == []
+
+
+def test_a_cmake_file_in_a_requirements_folder_is_not_read(write, check):
+    """``tests/requirements/CMakeLists.txt`` is no pip file, and neither are its calls."""
+    path = write(
+        "tests/requirements/CMakeLists.txt",
+        """
+        cmake_minimum_required(VERSION 3.16)
+        project(requirements_tests CXX)
+        add_executable(requires_clause requires_clause.cpp)
+        """,
+    )
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == [] and result.files_checked == 0
+    # Even when it is read as a requirements file, no line of it is a requirement.
+    assert parse_dependency_file(path, path.parent).dependencies == []
+
+
+@pytest.mark.parametrize(
+    "option", ["-f ./wheels", "--find-links=https://x.example/w", "--no-index"]
+)
+def test_find_links_makes_only_its_own_file_private(write, check, option):
+    """A name missing from PyPI may come from --find-links. That covers the file the
+    option is in, and no other file."""
+    write("requirements.txt", f"{option}\nonly-in-links\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    ghost-lib>=1\n")
+    write("app.py", "import ghost_mod_zz\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert found(result) == [("app.py", 1, 1), ("setup.cfg", 3, 1)]
+    assert "only-in-links" not in registry.queries and result.notes == []
+
+
+# --- Lists for another tool -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"--pre --extra-index-url {PRIVATE}",
+        f"--trusted-host pkgs.corp.example --index-url {PRIVATE}",
+        f"--index-url https://pypi.org/simple --extra-index-url {PRIVATE}",
+        f"--prefer-binary -i {PRIVATE}",
+        f"--pre --extra-index-url={PRIVATE}  # the company index",
+        f"-i{PRIVATE}",
+        f"--extra-index {PRIVATE}",
+        f"--i={PRIVATE}",
+    ],
+)
+def test_an_index_option_counts_anywhere_on_an_option_line(write, check, line):
+    """pip takes several options on one line, a value attached to ``-i``, and a long
+    option cut short. The index is seen in each, for the file and for the files
+    that inherit from it."""
+    write("requirements.txt", f"{line}\ncorp-auth==1.0\n")
+    write("setup.py", "from setuptools import setup\nsetup(install_requires=['corp-core'])\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert "a private package index is set in requirements.txt" in result.notes[0]
+
+
+@pytest.mark.parametrize(
+    "line", ["--pre --find-links ./wheels", "-f./wheels", "--find ./wheels", "--pre --no-i"]
+)
+def test_a_links_option_counts_anywhere_on_an_option_line(write, check, line):
+    """The same for ``--find-links`` and ``--no-index``, which cover their own file."""
+    write("requirements.txt", f"{line}\ncorp-auth==1.0\n")
+    write("constraints.txt", "ghost-pin==1.0\n")
+    registry = FakeRegistry(set())
+    assert found(check("SLOP001", registry=registry)) == [("constraints.txt", 1, 1)]
+    assert registry.queries == ["ghost-pin"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "--pre --index-url https://pypi.org/simple",
+        "--extra-index-url=https://pypi.org/simple --prefer-binary",
+        "-ihttps://pypi.org/simple",
+        # Not options of the file: a hash that continues a requirement, an option
+        # after a requirement (pip does not take an index from there), a comment.
+        "--hash=sha256:abc --hash=sha256:fff",
+        f"requests --index-url {PRIVATE}",
+        f"# --extra-index-url {PRIVATE}",
+        "--editable ./local --install-option=--fast",
+    ],
+)
+def test_lines_that_name_no_private_index(write, check, line):
+    """PyPI's own address, and words that only look like an index option."""
+    write("requirements.txt", f"{line}\nghost-lib==1.0\n")
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("requirements.txt", 2, 1)] and result.notes == []
+
+
+APT_LIST = "build-essential\nlibpq-dev\nlibxml2-dev\nrequests\n"
+
+
+@pytest.mark.parametrize(
+    "name", ["requirements/system.txt", "system-requirements.txt", "requirements/debian.in"]
+)
+def test_a_plain_list_that_pypi_mostly_lacks_is_not_reported(write, check, name):
+    """One name per line and nothing else may be a list for apt or R. When PyPI lacks
+    most of the names, the file is not a pip file, and nothing in it is reported."""
+    write(name, APT_LIST)
+    result = check("SLOP001", registry=FakeRegistry({"requests"}))
+    assert result.findings == []
+
+
+def test_a_plain_list_with_one_invented_name_is_reported(write, check):
+    """A pip file without versions is a plain list too. PyPI has most of its names, so
+    the one it lacks is reported."""
+    write("requirements/base.in", "django\nrequests\ncelery\nghost-lib\n")
+    write("requirements/half.in", "requests\nghost-half\n")
+    result = check("SLOP001", registry=FakeRegistry({"django", "requests", "celery"}))
+    assert found(result) == [("requirements/base.in", 4, 1), ("requirements/half.in", 2, 1)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "build-essential==12.9\nlibpq-dev\nlibxml2-dev\n",  # a version
+        "-c constraints.txt\nlibpq-dev\nlibxml2-dev\n",  # an option
+        "libpq-dev[extra]\nlibxml2-dev\n",  # an extra
+        'libpq-dev ; python_version < "3.12"\nlibxml2-dev\n',  # a marker
+        "libpq-dev \\\n    --hash=sha256:abc\nlibxml2-dev\n",  # a hash
+    ],
+)
+def test_a_file_with_pip_syntax_is_a_pip_file(write, check, body):
+    """A version, an option, an extra, a marker or a hash is something only pip reads.
+    Then every missing name is reported, however many there are."""
+    write("requirements/system.txt", body)
+    result = check("SLOP001", registry=FakeRegistry(set()))
+    assert {"libpq-dev", "libxml2-dev"} <= {f.subject for f in result.findings}
+
+
+def test_requirements_txt_is_never_doubted(write, check):
+    """The files v0.2 read keep their behaviour: a plain ``requirements.txt`` whose
+    names PyPI lacks is reported in full."""
+    write("requirements.txt", "ghost-one\nghost-two\n")
+    write("requirements-dev.txt", "ghost-three\n")
+    result = check("SLOP001", registry=FakeRegistry(set()))
+    assert [f.subject for f in result.findings] == ["ghost-three", "ghost-one", "ghost-two"]
+
+
+def test_no_answer_never_makes_a_plain_list_a_pip_file(write, check):
+    """Names PyPI gave no answer for don't count as found. So a list of apt packages
+    stays silent when half the lookups fail."""
+
+    class Half(FakeRegistry):
+        """Answers for names that start with "lib", and for no other."""
+
+        def exists(self, name):
+            """Unknown unless the name starts with "lib"."""
+            return super().exists(name) if name.startswith("lib") else None
+
+    write("requirements/system.txt", APT_LIST)
+    assert check("SLOP001", registry=Half(set())).findings == []
+
+
+def test_a_plain_list_is_not_reported_while_answers_are_missing(write, check):
+    """PyPI answers two names and gives no answer for the rest (a rate limit, a
+    dropped connection). The names it did not answer may all be missing, so the
+    file may still be a list for another tool: nothing is reported. With every
+    answer in, the same file is silent too."""
+
+    class Partial(FakeRegistry):
+        """Knows ``curl``, lacks ``build-essential``, and can't say for any other."""
+
+        def exists(self, name):
+            """An answer for the two names, unknown for the rest."""
+            return super().exists(name) if name in ("curl", "build-essential") else None
+
+    names = "curl\nbuild-essential\nlibxml2-dev\nlibffi-dev\nlibssl-dev\npython3-dev\n"
+    write("requirements/system.txt", names)
+    assert check("SLOP001", registry=Partial({"curl"})).findings == []
+    assert check("SLOP001", registry=FakeRegistry({"curl"})).findings == []
+
+
+# --- setup.cfg --------------------------------------------------------------------------
+
+SETUP_CFG = """
+[metadata]
+name = demo
+description = requests
+
+[options]
+packages = find:
+install_requires =
+    requests>=2
+    # a comment line
+    ghost-lib ; python_version < "3.11"
+    corp-lib @ https://example.com/corp.whl
+    ignored-lib  # slopfence: ignore
+setup_requires = pbr; setuptools
+tests_require = pytest; python_version > "3"
+python_requires = >=3.8
+
+[options.extras_require]
+dev =
+    ghost-dev
+    demo[docs]
+docs = sphinx
+all = file: requirements-all.txt
+
+[options.entry_points]
+console_scripts =
+    demo = demo.cli:main
+
+[flake8]
+ignore = E501
+"""
+
+
+def test_setup_cfg_found_and_missing(write, check, tmp_path):
+    """install_requires, setup_requires, tests_require and extras are read, each on its line."""
+    path = write("setup.cfg", SETUP_CFG)
+    assert brief(path, tmp_path) == [
+        ("requests", 8, True),
+        ("ghost-lib", 10, True),
+        ("corp-lib", 11, False),
+        ("ignored-lib", 12, True),
+        ("pbr", 13, True),
+        ("setuptools", 13, True),
+        ("pytest", 14, True),
+        ("ghost-dev", 19, True),
+        ("demo", 20, True),
+        ("sphinx", 21, True),
+    ]
+    assert parse_dependency_file(path, tmp_path).project_names == {"demo"}
+    registry = FakeRegistry({"requests", "pbr", "setuptools", "pytest", "sphinx"})
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("setup.cfg", 10, 1), ("setup.cfg", 19, 1)]
+    # A direct reference, an ignored line and the project's own name are never sent.
+    assert not {"corp-lib", "ignored-lib", "demo"} & set(registry.queries)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[options]\ninstall_requires = file: requirements.txt\n",
+        "no section header\n",
+        "[options]\ninstall_requires =\n    a\n\n[options]\nx = 1\n",  # duplicate section
+        "[options]\ninstall_requires = a\ninstall_requires = b\n",  # duplicate key
+        "[flake8]\nmax-line-length = 160\nignore = W503,E402\n",
+        "[options]\ninstall_requires =\n    %(name)s-core\n",
+        "[options]\npython_requires = >=3.8\nzip_safe = False\n",
+        "[options]\ninstall_requires = requests, flask\n",  # commas: setuptools rejects it
+        "[options]\n= no option name\n",
+    ],
+)
+def test_setup_cfg_without_readable_dependencies(write, tmp_path, body):
+    """file: directives, broken files and tool-only files give nothing, silently."""
+    assert parse_dependency_file(write("setup.cfg", body), tmp_path).dependencies == []
+
+
+# Lines an INI file is made of, and ways to indent them: enough to build files that
+# ``configparser`` reads in every way it can.
+CFG_LINES = [
+    "[options]",
+    "[metadata]",
+    "[options.extras_require]",
+    "[a]b]",
+    "[x] # c",
+    "install_requires =",
+    "install_requires = a",
+    "name = demo",
+    "key: value",
+    "k = v ; w",
+    "dev =",
+    "requests>=2",
+    "# comment",
+    "; comment",
+    "",
+    "   ",
+    "= novalue",
+    "a = b = c",
+    "x\x0cy",
+    "x\ry",
+    "\x0c",
+    "x\u2028y",
+    "K = v",
+]
+CFG_INDENTS = ["", "", " ", "    ", "\t", " \t", "\x0c  "]
+
+
+def test_setup_cfg_lines_are_the_lines_configparser_reads():
+    """Line numbers come from slopfence's own reading of the file. It must find the
+    value lines that ``configparser`` finds, on every Python version, and each on the
+    line it names. Here that is checked for 3,000 small files."""
+    rng = random.Random(53)
+    compared = 0
+    for _ in range(3000):
+        text = "\n".join(
+            rng.choice(CFG_INDENTS) + rng.choice(CFG_LINES) for _ in range(rng.randint(1, 8))
+        )
+        parser = configparser.RawConfigParser()
+        parser.optionxform = str
+        try:
+            parser.read_string(text)
+        except (configparser.Error, ValueError):
+            continue
+        expected = {
+            (section, option): lines
+            for section in parser.sections()
+            for option, value in parser.items(section, raw=True)
+            if (lines := [v.strip() for v in value.split("\n") if v.strip()])
+        }
+        scanned: dict[tuple[str, str], list[str]] = {}
+        for section, option, (lineno, value, _) in _cfg_lines(text):
+            scanned.setdefault((section, option), []).append(value)
+            assert value in text.split("\n")[lineno - 1], (text, lineno)
+        assert scanned == expected, text
+        compared += 1
+    assert compared > 200  # most random files are not INI files; enough are
+
+
+def test_a_form_feed_does_not_shift_setup_cfg_lines(tmp_path, check):
+    """Old files use a form feed as a page break. It is not a line break: the finding
+    is on the line that git and every editor count."""
+    (tmp_path / "setup.cfg").write_text(
+        "[metadata]\nname = demo\n\x0c\n[options]\ninstall_requires =\n    ghost-lib\x0c\n",
+        encoding="utf-8",
+    )
+    assert found(check("SLOP001", registry=FakeRegistry(set()))) == [("setup.cfg", 6, 1)]
+
+
+def test_setup_cfg_details(write, tmp_path):
+    """Dashed keys, tabs, ignore-file and dependency_links."""
+    path = write("setup.cfg", "[options]\nInstall-Requires =\n\tghost\n")
+    assert brief(path, tmp_path) == [("ghost", 3, True)]
+    path = write("setup.cfg", "# slopfence: ignore-file\n[options]\ninstall_requires = ghost\n")
+    assert [d.suppressed for d in parse_dependency_file(path, tmp_path).dependencies] == [True]
+    path = write(
+        "setup.cfg",
+        "[options]\ndependency_links = https://corp.example/simple\ninstall_requires = corp-a\n",
+    )
+    assert brief(path, tmp_path) == [("corp-a", 3, False)]
+    assert parse_dependency_file(path, tmp_path).private_index
+
+
+@pytest.mark.parametrize(
+    ("value", "names"),
+    [
+        ('a; python_version < "3"', ["a"]),
+        ('a; python_version < "3"; b', ["a", "b"]),
+        # Without quotes the marker would read as a package called python_version.
+        ("a; python_version < 3", ["a"]),
+        ("a; sys_platform == win32; b", ["a", "b"]),
+        ("pbr; setuptools", ["pbr", "setuptools"]),
+    ],
+)
+def test_setup_cfg_one_line_lists_are_cut_at_semicolons(write, tmp_path, value, names):
+    """A value on the key's line is cut at ``;``, as setuptools does. A part that is a
+    marker is not a package, and the parts after it still count."""
+    path = write("setup.cfg", f"[options]\ntests_require = {value}\n")
+    assert [d.name for d in parse_dependency_file(path, tmp_path).dependencies] == names
+
+
+def test_setup_cfg_marker_on_a_line_of_a_list_is_one_requirement(write, tmp_path):
+    """In a list with one requirement per line, ``;`` starts that line's marker."""
+    path = write("setup.cfg", '[options]\ninstall_requires =\n    a; python_version < "3"\n    b\n')
+    assert brief(path, tmp_path) == [("a", 3, True), ("b", 4, True)]
+    # A package may be called like a marker variable. Only a part after a ";" is doubted.
+    path = write("setup.cfg", "[options]\ninstall_requires =\n    extra\n    requests\n")
+    assert brief(path, tmp_path) == [("extra", 3, True), ("requests", 4, True)]
+    path = write("setup.cfg", "[options]\ninstall_requires = extra; requests\n")
+    assert brief(path, tmp_path) == [("extra", 2, True), ("requests", 2, True)]
+
+
+# --- setup.py ---------------------------------------------------------------------------
+
+SETUP_PY = """
+from setuptools import setup
+
+setup(
+    name="demo",
+    install_requires=[
+        "requests>=2",
+        "ghost-lib",
+        "ghost-ignored",  # slopfence: ignore[SLOP001]
+        "corp @ git+https://example.com/corp.git",
+    ],
+    extras_require={"dev": ["pytest", "demo[docs]"], ":python_version<'3.8'": ["ghost-extra"]},
+    setup_requires="pbr",
+    tests_require=("nose",),
+    python_requires=">=3.8",
+    packages=["demo", "demo.sub"],
+    entry_points={"console_scripts": ["demo = demo.cli:main"]},
+)
+"""
+
+
+def test_setup_py_found_and_missing(write, check, tmp_path):
+    """Literal lists, strings, tuples and dicts passed to setup() are read."""
+    path = write("setup.py", SETUP_PY)
+    declared = parse_dependency_file(path, tmp_path)
+    assert [(d.name, d.line, d.col, d.validate, d.suppressed) for d in declared.dependencies] == [
+        ("requests", 6, 9, True, False),
+        ("ghost-lib", 7, 9, True, False),
+        ("ghost-ignored", 8, 9, True, True),
+        ("corp", 9, 9, False, False),
+        ("pytest", 11, 29, True, False),
+        ("demo", 11, 39, True, False),
+        ("ghost-extra", 11, 80, True, False),
+        ("pbr", 12, 20, True, False),
+        ("nose", 13, 20, True, False),
+    ]
+    assert declared.project_names == {"demo"}
+    registry = FakeRegistry({"requests", "pytest", "pbr", "nose"})
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("setup.py", 7, 9), ("setup.py", 11, 80)]
+    assert [f.subject for f in result.findings] == ["ghost-lib", "ghost-extra"]
+    assert result.files_checked == 1  # a Python file and a dependency file, counted once
+    # An ignored line, a git reference and the project's own name are never sent.
+    assert not {"ghost-ignored", "corp", "demo"} & set(registry.queries)
+
+
+def test_setup_py_follows_names(write, tmp_path):
+    """Variables assigned literals, list concatenation and **kwargs are followed."""
+    path = write(
+        "setup.py",
+        """
+        import sys
+        import setuptools
+
+        VERSION = "1.0"
+        requires = ["requests", "six"]
+        if sys.platform == "win32":
+            requires += ["pywin32"]
+        extras = {"docs": ["sphinx"]}
+        extras["all"] = extras["docs"] + ["ghost-extra"]
+        test_deps: list[str] = ["pytest", "pytest-cov"]
+        numpy_req = "numpy>=1.20"
+        kwargs = dict(tests_require=test_deps)
+        kwargs["setup_requires"] = ["wheel"] if sys.version_info > (3,) else ["wheel", "six"]
+        more = {"extras_require": {**extras, "x": [*test_deps, "ghost-x"]}}
+
+        setuptools.setup(
+            name="demo",
+            version=VERSION,
+            install_requires=requires + [numpy_req, "demo-core==" + VERSION, f"x=={VERSION}"],
+            **kwargs,
+            **more,
+        )
+        """,
+    )
+    declared = parse_dependency_file(path, tmp_path).dependencies
+    assert [(d.name, d.line) for d in declared] == [
+        ("requests", 5),
+        ("six", 5),
+        ("pywin32", 7),
+        ("sphinx", 8),
+        ("ghost-extra", 9),
+        ("pytest", 10),
+        ("pytest-cov", 10),
+        ("numpy", 11),
+        ("wheel", 13),
+        ("wheel", 13),
+        ("six", 13),
+        ("ghost-x", 14),
+    ]
+
+
+def test_setup_py_skips_everything_computed(write, tmp_path, check):
+    """Calls, comprehensions and built strings are never guessed at, and never run."""
+    marker = tmp_path / "executed"
+    path = write(
+        "setup.py",
+        f"""
+        from setuptools import setup
+
+        open({str(marker)!r}, "w").close()
+
+        def read(name):
+            return open(name).read().splitlines()
+
+        version = "1.0"
+        prefix = "demo-"
+        setup(
+            name="demo",
+            install_requires=read("requirements.txt"),
+            extras_require={{"dev": [line for line in read("dev.txt")], "x": [prefix + "plugin"]}},
+            tests_require=sorted({{"a", "b"}}),
+            setup_requires=["pkg==" + version, "pkg-%s" % version, "{{}}-x".format(prefix)],
+        )
+        """,
+    )
+    assert parse_dependency_file(path, tmp_path).dependencies == []
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == []
+    assert registry.queries == [] and not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("body", "names"),
+    [
+        # The name first holds a file name, then the list that was read from it.
+        (
+            'reqs = "requirements.txt"\nwith open(reqs) as f:\n    reqs = f.read().splitlines()\n'
+            "setup(install_requires=reqs)\n",
+            [],
+        ),
+        ('reqs = "base.txt"\nreqs = load(reqs)\nsetup(install_requires=reqs)\n', []),
+        # A string that is added to is being built: no part of it is a requirement.
+        ('req = "demo"\nreq += suffix\nsetup(install_requires=[req])\n', []),
+        ('req = "plugin"\nreq += "-core"\nsetup(install_requires=req)\n', []),
+        # A name that only ever holds a string is that string.
+        ('req = "numpy>=1.20"\nsetup(install_requires=[req, "six"])\n', ["numpy", "six"]),
+        ('req = "a" if PY3 else "b"\nsetup(setup_requires=req)\n', ["a", "b"]),
+        # Another function's variable of the same name doesn't hide the list.
+        (
+            'def version():\n    reqs = "__version__"\n    return find(reqs)\n\n'
+            'reqs = ["requests"]\nsetup(install_requires=reqs)\n',
+            ["requests"],
+        ),
+        # A space-separated string is not a requirement.
+        ('setup(install_requires="requests flask")\n', []),
+        # Extras that a function returns are not known.
+        ("setup(extras_require=load_extras())\n", []),
+    ],
+)
+def test_setup_py_names_that_hold_strings(write, tmp_path, body, names):
+    """A string assigned to a name is a requirement only when the name never holds
+    anything else. ``reqs = "requirements.txt"`` is a file name."""
+    path = write("setup.py", "from setuptools import setup\n" + body)
+    assert [d.name for d in parse_dependency_file(path, tmp_path).dependencies] == names
+
+
+@pytest.mark.parametrize(
+    ("body", "names"),
+    [
+        # The name was first used for something else: folders for package_data.
+        (
+            'extras = {"data": ["schemas", "templates"]}\npackage_data = {"demo": extras["data"]}\n'
+            'extras = {"docs": ["sphinx"]}\n'
+            "setup(package_data=package_data, extras_require=extras)\n",
+            ["sphinx"],
+        ),
+        (
+            'reqs = ["old"]\nreqs += ["older"]\nreqs = ["new"]\nsetup(install_requires=reqs)\n',
+            ["new"],
+        ),
+        (
+            'extras = {}\nextras["dev"] = ["old"]\nextras = {"docs": ["new"]}\n'
+            "setup(extras_require=extras)\n",
+            ["new"],
+        ),
+        # A new value that uses the old one adds to it.
+        ('reqs = ["a"]\nreqs = reqs + ["b"]\nsetup(install_requires=reqs)\n', ["a", "b"]),
+        ('reqs = ["a"]\nreqs = sorted(reqs)\nsetup(install_requires=reqs)\n', ["a"]),
+        # An assignment that may not run replaces nothing.
+        ('reqs = ["a"]\nif WINDOWS:\n    reqs = ["b"]\nsetup(install_requires=reqs)\n', ["a", "b"]),
+        (
+            'try:\n    reqs = read()\nexcept OSError:\n    reqs = ["a"]\n'
+            "setup(install_requires=reqs)\n",
+            ["a"],
+        ),
+        (
+            'reqs = ["a"]\n\ndef main():\n    reqs = ["b"]\n    setup(install_requires=reqs)\n',
+            ["a", "b"],
+        ),
+    ],
+)
+def test_setup_py_a_new_value_replaces_the_old_one(write, tmp_path, body, names):
+    """A plain assignment at the top of the file replaces what the name held before.
+    What was assigned above it was for something else and is not a requirement."""
+    path = write("setup.py", "from setuptools import setup\n" + body)
+    assert [d.name for d in parse_dependency_file(path, tmp_path).dependencies] == names
+
+
+def test_setup_py_details(write, tmp_path):
+    """Multi-line strings, dependency_links, ignore-file and broken files."""
+    path = write(
+        "setup.py",
+        '''
+        from setuptools import setup
+
+        setup(
+            install_requires="""
+                requests>=2
+                ghost-lib   # a comment
+            """,
+            dependency_links=["https://corp.example/simple"],
+        )
+        ''',
+    )
+    assert brief(path, tmp_path) == [("requests", 5, False), ("ghost-lib", 6, False)]
+    assert parse_dependency_file(path, tmp_path).private_index
+    path = write(
+        "setup.py",
+        "# slopfence: ignore-file\nfrom setuptools import setup\nsetup(install_requires=['x'])\n",
+    )
+    assert [d.suppressed for d in parse_dependency_file(path, tmp_path).dependencies] == [True]
+    assert parse_dependency_file(write("setup.py", "def broken(:\n"), tmp_path).dependencies == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A Sphinx extension.
+        "def setup(app):\n    app.add_config_value('x', 1, 'env')\n",
+        # A task runner whose task is called setup, and takes the same keyword.
+        "def setup(install_requires=('git',)):\n    pass\n\nsetup(install_requires=['nginx'])\n",
+        # Keywords of another call.
+        "from x import cythonize\ncythonize('a.pyx', install_requires=['not-a-kwarg'])\n",
+        "from numpy.distutils.core import setup\nsetup(**configuration(top_path='').todict())\n",
+    ],
+)
+def test_setup_calls_that_are_not_packaging(write, tmp_path, body):
+    """A ``setup`` the file defines itself, and other calls, declare nothing."""
+    assert parse_dependency_file(write("setup.py", body), tmp_path).dependencies == []
+
+
+def test_a_method_called_setup_does_not_hide_the_real_call(write, tmp_path):
+    """Only a ``setup`` defined at the top of the file replaces setuptools' one."""
+    path = write(
+        "setup.py",
+        "from setuptools import setup\n\nclass Build:\n    def setup(self):\n        pass\n\n"
+        "setup(install_requires=['requests'])\n",
+    )
+    assert brief(path, tmp_path) == [("requests", 7, True)]
+
+
+def test_setup_py_more_ways_to_pass_the_lists(write, tmp_path):
+    """``dict(...)`` for extras, ``**`` of a dict literal, a variable for the project's
+    name, and assignments the parser has no use for."""
+    path = write(
+        "setup.py",
+        """
+        import os
+        from setuptools import setup
+
+        NAME = "acme-core"
+        here, _ = os.path.split(__file__)
+        os.environ["X"] = "1"
+        base = {"install_requires": ["requests"]}
+        setup(
+            name=NAME,
+            extras_require=dict(dev=["pytest"], **{"docs": ["sphinx"]}),
+            **{**base, "tests_require": ["nose"]},
+        )
+        """,
+    )
+    declared = parse_dependency_file(path, tmp_path)
+    assert [d.name for d in declared.dependencies] == ["requests", "pytest", "nose"]
+    assert declared.project_names == {"acme-core"}
+
+
+def test_setup_py_long_and_deep_expressions(write, tmp_path):
+    """A sum of many lists is read in full. Deeply nested expressions are read as far
+    as twenty levels and never end the run."""
+    many = " + ".join(f'["pkg{n}"]' for n in range(300))
+    path = write("setup.py", f"from setuptools import setup\nsetup(install_requires={many})\n")
+    assert len(parse_dependency_file(path, tmp_path).dependencies) == 300
+
+    chain = " if x else ".join(f'"alt{n}"' for n in range(150))
+    nested_list = "[*" * 150 + '["deep"]' + "]" * 150
+    nested_dict = "{**" * 150 + '{"dev": ["deep-extra"]}' + "}" * 150
+    nested_kwargs = "{**" * 150 + '{"tests_require": ["deep-test"]}' + "}" * 150
+    path = write(
+        "setup.py",
+        "from setuptools import setup\n"
+        f"setup(install_requires={chain}, setup_requires={nested_list},\n"
+        f"      extras_require={nested_dict}, **{nested_kwargs})\n",
+    )
+    names = [d.name for d in parse_dependency_file(path, tmp_path).dependencies]
+    assert names == [f"alt{n}" for n in range(20)]
+
+
+def repeated(levels):
+    """A setup.py where each list is the one before it, eight times over."""
+    lists = "".join(f"a{n} = " + " + ".join([f"a{n - 1}"] * 8) + "\n" for n in range(1, levels))
+    return (
+        "from setuptools import setup\na0 = ['requests']\n"
+        f"{lists}setup(name='demo', install_requires=a{levels - 1})\n"
+    )
+
+
+def test_a_name_used_many_times_is_not_followed_without_end(write, tmp_path):
+    """A name is followed each time it is used. Eight uses of the list before it, seven
+    lists deep, would be more than two million steps for a file of 400 bytes. A file
+    gets a fixed number of steps. One that needs more is generated, and declares
+    nothing that can be relied on."""
+    path = write("setup.py", repeated(levels=3))
+    assert brief(path, tmp_path) == [("requests", 2, True)]
+    path = write("setup.py", repeated(levels=8))
+    start = time.perf_counter()
+    declared = parse_dependency_file(path, tmp_path)
+    assert time.perf_counter() - start < 5
+    assert declared.dependencies == [] and declared.project_names == {"demo"}
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ['"a" + ' * 100_000 + '"b"', "~" * 20_000 + "1", "lambda: " * 5000 + "1"],
+    ids=["a sum of 100,000 strings", "20,000 unary operators", "5,000 nested lambdas"],
+)
+def test_a_setup_py_too_deep_for_the_parser_does_not_stop_the_run(write, tmp_path, expression):
+    """Every setup.py of the project is read for the name it gives the project, also
+    one that is not checked. One that Python's parser gives up on declares nothing."""
+    deep = write("vendor/generated/setup.py", f"from setuptools import setup\nx = {expression}\n")
+    checked = write("requirements.txt", "ghost-lib\n")
+    assert parse_dependency_file(deep, tmp_path).dependencies == []
+    result = run([checked], tmp_path, FakeRegistry(set()), select=["SLOP001"])
+    assert found(result) == [("requirements.txt", 1, 1)] and result.parse_errors == []
+
+
+def test_setup_py_is_still_checked_as_python(write, check):
+    """Other rules keep running on setup.py, and a broken one is one parse error."""
+    write("setup.py", "# I hope this helps!\nfrom setuptools import setup\nsetup()\n")
+    assert [f.rule for f in check().findings] == ["SLOP051"]
+    write("setup.py", "def broken(:\n")
+    result = check("SLOP001", registry=FakeRegistry(set()))
+    assert result.parse_errors == ["setup.py"] and result.findings == []
+
+
+def test_imports_in_setup_py_are_still_looked_up(write, tmp_path, not_installed):
+    """``setup.py`` is a dependency file and a Python file. With ``check_imports`` its
+    imports are looked up like those of any other file, as in v0.2."""
+    path = write("setup.py", "import ghost_build_helper\nfrom setuptools import setup\n")
+    write("app.py", "import ghost_app_helper\n")
+    for paths in ([tmp_path], [path]):
+        registry = FakeRegistry({"setuptools"})
+        result = run(paths, tmp_path, registry, select=["SLOP001"], check_imports=True)
+        assert ("setup.py", "ghost_build_helper") in [(f.path, f.subject) for f in result.findings]
+        assert "ghost_build_helper" in registry.queries
+
+
+# --- Pipfile ----------------------------------------------------------------------------
+
+PIPFILE = """
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+requests = "*"
+ghost-lib = ">=1.0"
+ghost-ignored = "*"   # slopfence: ignore
+flask = {version = "*", extras = ["async"], index = "pypi"}
+corp-git = {git = "https://example.com/corp.git", ref = "main"}
+local = {path = ".", editable = true}
+wheel-url = {file = "https://example.com/x.whl"}
+odd-index = {version = "*", index = "corp"}
+"zope.interface" = "*"
+odd-shape = {version = "*", something_new = true}
+
+[dev-packages]
+ghost-dev = "*"
+
+[requires]
+python_version = "3.12"
+"""
+
+
+def test_pipfile_found_and_missing(write, check, tmp_path):
+    """[packages] and [dev-packages] are checked; git, path, file and odd indexes aren't."""
+    path = write("Pipfile", PIPFILE)
+    declared = parse_dependency_file(path, tmp_path).dependencies
+    assert [(d.name, d.line, d.validate, d.suppressed) for d in declared] == [
+        ("requests", 7, True, False),
+        ("ghost-lib", 8, True, False),
+        ("ghost-ignored", 9, True, True),
+        ("flask", 10, True, False),
+        ("corp-git", 11, False, False),
+        ("local", 12, False, False),
+        ("wheel-url", 13, False, False),
+        ("odd-index", 14, False, False),
+        ("zope.interface", 15, True, False),
+        ("odd-shape", 16, False, False),
+        ("ghost-dev", 19, True, False),
+    ]
+    registry = FakeRegistry({"requests", "flask", "zope.interface"})
+    assert found(check("SLOP001", registry=registry)) == [("Pipfile", 8, 1), ("Pipfile", 19, 1)]
+    assert set(registry.queries) == {
+        "requests",
+        "ghost-lib",
+        "flask",
+        "zope.interface",
+        "ghost-dev",
+    }
+
+
+def test_pipfile_private_source_and_details(write, check, tmp_path):
+    """A [[source]] that isn't PyPI makes the file's packages private."""
+    write("Pipfile", f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n\n[packages]\ncorp-a = "*"\n')
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == []
+    assert registry.queries == []
+    path = write("Pipfile", '[packages]\na = {version = "*", index = "pypi"}\n')
+    assert brief(path, tmp_path) == [("a", 2, True)]
+    path = write("Pipfile", "# slopfence: ignore-file\n[packages]\nghost = '*'\n")
+    assert [d.suppressed for d in parse_dependency_file(path, tmp_path).dependencies] == [True]
+    assert parse_dependency_file(write("Pipfile", "[packages\n"), tmp_path).dependencies == []
+    assert parse_dependency_file(write("Pipfile", "packages = 3\n"), tmp_path).dependencies == []
+
+
+def test_a_dependency_file_that_cannot_be_read_declares_nothing(tmp_path, check):
+    """A file that is not text is skipped, like a Python file that can't be read."""
+    for name in ("requirements.txt", "setup.cfg", "Pipfile"):
+        (tmp_path / name).write_bytes(b"ghost-lib\n\xff\xfe\x00")
+        assert parse_dependency_file(tmp_path / name, tmp_path).dependencies == []
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+
+
+INDEX_AND_NAME = f"--extra-index-url {PRIVATE}\ncorp-auth==1.4\n"
+NOT_UTF8 = {
+    "Latin-1": "# Abh\u00e4ngigkeiten f\u00fcr den Dienst\n".encode("latin-1")
+    + INDEX_AND_NAME.encode(),
+    "UTF-16": codecs.BOM_UTF16_LE + INDEX_AND_NAME.encode("utf-16-le"),
+    "UTF-16 big-endian": codecs.BOM_UTF16_BE + INDEX_AND_NAME.encode("utf-16-be"),
+    "UTF-32": codecs.BOM_UTF32_LE + INDEX_AND_NAME.encode("utf-32-le"),
+    # Python takes the word after "coding:" for the name of an encoding.
+    "coding": b"# no hard-coding: pin versions in constraints\n" + INDEX_AND_NAME.encode(),
+}
+
+
+@pytest.mark.parametrize("encoding", sorted(NOT_UTF8))
+def test_an_index_in_a_requirements_file_that_is_not_utf8_still_counts(tmp_path, check, encoding):
+    """pip reads a requirements file in the locale's encoding, and in UTF-16 with a
+    byte order mark (what ``>`` writes in Windows PowerShell). slopfence reads no
+    package from such a file, as before. Its index is still seen, so the files that
+    inherit from it keep their names on the machine."""
+    (tmp_path / "requirements.txt").write_bytes(NOT_UTF8[encoding])
+    cfg = "[options]\ninstall_requires =\n    corp-auth\n"
+    (tmp_path / "setup.cfg").write_text(cfg, encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert "a private package index is set in requirements.txt" in result.notes[0]
+    assert "secret" not in result.notes[0]
+
+
+def test_a_requirements_file_that_can_not_be_opened_names_no_index(tmp_path):
+    """A path that can't be opened at all (here: a folder) declares nothing and names
+    nothing. It does not end the run."""
+    (tmp_path / "requirements.txt").mkdir()
+    declared = parse_dependency_file(tmp_path / "requirements.txt", tmp_path)
+    assert declared.dependencies == [] and not declared.private_index
+
+
+def test_a_requirements_file_that_is_not_utf8_and_names_no_index_changes_nothing(tmp_path, check):
+    """Without an index option, such a file says nothing about the other files."""
+    (tmp_path / "requirements.txt").write_bytes(
+        "# f\u00fcr pip\ncorp-auth==1.4\n".encode("latin-1")
+    )
+    cfg = "[options]\ninstall_requires =\n    ghost-lib\n"
+    (tmp_path / "setup.cfg").write_text(cfg, encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("setup.cfg", 3, 1)] and result.notes == []
+    assert registry.queries == ["ghost-lib"]
+
+
+def test_pipfile_entries_that_are_not_understood_stay_declared(write, check, not_installed):
+    """An entry with an unknown key, or an unquoted dotted name, is not looked up. It
+    is still declared, so an import of it is not looked up either."""
+    write(
+        "Pipfile",
+        '[packages]\nodd_shape = {version = "*", something_new = true}\ndotted.name = "*"\n',
+    )
+    write("app.py", "import odd_shape\nimport dotted\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert result.findings == [] and registry.queries == []
+
+
+NOT_NAMES = ['"my pkg"', '"foo/bar?x=1#frag"', '"../../simple/internal"', '" padded "', '"a\\tb"']
+NOT_NAMES += ['"requests[security]"', '"corp-auth>=1"', '"vendor.tar.gz"']
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["Pipfile\n[packages]", "pyproject.toml\n[tool.poetry.dependencies]"],
+    ids=["Pipfile", "Poetry"],
+)
+def test_a_table_key_that_is_no_package_name_is_never_sent(write, check, header):
+    """A quoted TOML key can hold anything. Only a package name goes to the registry:
+    a key with a space would end the run, and one with ``/`` or ``?`` would ask PyPI
+    for another address than the one of a package."""
+    name, table = header.split("\n")
+    body = "".join(f'{key} = "*"\n' for key in [*NOT_NAMES, "ghost-lib", '"zope.interface"'])
+    write(name, f"{table}\n{body}")
+    registry = FakeRegistry({"zope.interface"})
+    result = check("SLOP001", registry=registry)
+    assert [f.subject for f in result.findings] == ["ghost-lib"]
+    assert sorted(registry.queries) == ["ghost-lib", "zope.interface"]
+
+
+def test_pipfile_vouches_for_imports(write, check, not_installed):
+    """Pipfile packages are declared dependencies: imports of them aren't looked up."""
+    write("Pipfile", "[packages]\nurllib3 = '*'\n\n[dev-packages]\niniconfig = '*'\n")
+    write("app.py", "import urllib3\nimport iniconfig\nimport ghost_pkg_zz\n")
+    registry = FakeRegistry({"urllib3", "iniconfig"})
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert found(result) == [("app.py", 3, 1)]
+    assert sorted(set(registry.queries)) == ["ghost-pkg-zz", "ghost_pkg_zz", "iniconfig", "urllib3"]
+
+
+# --- Privacy: what is sent ------------------------------------------------------------
+
+SOURCES = {
+    "setup.cfg": "[options]\ninstall_requires =\n    corp-auth\n",
+    "setup.py": "from setuptools import setup\nsetup(install_requires=['corp-auth'])\n",
+    "Pipfile": "[packages]\ncorp-auth = '*'\n",
+    "requirements/base.in": "corp-auth>=1\n",
+    "constraints.txt": "corp-auth==1.0\n",
+    "dev-requirements.txt": "corp-auth[extra]\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(SOURCES))
+def test_each_source_found_known_offline_unreachable_and_environment(write, check, name):
+    """Every new source reports a missing package, and never sends a name it mustn't."""
+    write(name, SOURCES[name])
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert [(f.path, f.rule, f.subject) for f in result.findings] == [
+        (name, "SLOP001", "corp-auth")
+    ]
+    assert result.findings[0].message == (
+        "Dependency 'corp-auth' does not exist on PyPI (possible hallucination)"
+    )
+
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry, known_packages=["corp-*"]).findings == []
+    assert registry.queries == []  # known packages are never sent
+
+    registry = FakeRegistry(set())
+    switched_off = check("SLOP001", registry=registry, per_file_ignores={name: ["SLOP001"]})
+    assert switched_off.findings == [] and registry.queries == []
+
+    assert check("SLOP001").findings == []  # offline
+    assert check("SLOP001", registry=DownRegistry()).findings == []  # PyPI can't be reached
+    assert check("SLOP001", registry=FakeRegistry({"corp-auth"})).findings == []  # it exists
+
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, private_index="the PIP_INDEX_URL variable")
+    assert result.findings == [] and registry.queries == []
+    assert len(result.notes) == 1 and "made no PyPI lookups" in result.notes[0]
+
+
+def test_cli_offline_and_default_lookups(tmp_path, monkeypatch, capsys):
+    """Through the CLI: only declared names are asked, and --offline asks nothing."""
+    for name, body in SOURCES.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body.replace("corp-auth", f"ghost-{len(name)}"), encoding="utf-8")
+    (tmp_path / "app.py").write_text("import corp_secret\n", encoding="utf-8")
+    cache = tmp_path / "cache" / "slopfence"
+    cache.mkdir(parents=True)
+    names = sorted({f"ghost-{len(name)}" for name in SOURCES})
+    (cache / "pypi.json").write_text(
+        json.dumps({n: [False, 9e12] for n in names}), encoding="utf-8"
+    )
+    monkeypatch.setenv("SLOPFENCE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.chdir(tmp_path)
+    asked: list[str] = []
+    real_exists = PyPIRegistry.exists
+
+    def exists(self, name):
+        """Record every name slopfence asks the registry about."""
+        asked.append(name)
+        return real_exists(self, name)
+
+    def no_network(self, key):
+        """Fail the test if a lookup isn't answered from the pinned cache."""
+        raise AssertionError(f"unexpected network lookup for {key!r}")
+
+    monkeypatch.setattr(PyPIRegistry, "exists", exists)
+    monkeypatch.setattr(PyPIRegistry, "_query", no_network)
+
+    assert main([".", "--format", "json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert sorted({f["path"] for f in report["findings"]}) == sorted(SOURCES)
+    assert sorted(set(asked)) == names  # the import name stayed local
+    asked.clear()
+    assert main([".", "--format", "json", "--offline"]) == 0
+    assert asked == []
+
+
+# --- Privacy: a private index somewhere in the project ----------------------------------
+
+# Layouts where the index is written in requirements.txt only, and pip is given both
+# files. v0.2 read requirements.txt alone, and sent nothing.
+INHERITING = {
+    "requirements.in": "requests\ncorp-auth\n",  # pip-compile writes the index into the .txt
+    "requirements/base.in": "django\ncorp-billing\n",
+    "constraints.txt": "corp-auth==1.4.0\nrequests==2.32.0\n",  # pip install -r ... -c ...
+    "dev-requirements.txt": "corp-testkit\npytest\n",
+    "Pipfile": '[packages]\ncorp-auth = "*"\n',
+    "setup.py": 'from setuptools import setup\nsetup(name="x", install_requires=["corp-auth"])\n',
+    "setup.cfg": "[options]\ninstall_requires =\n    corp-auth\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(INHERITING))
+def test_a_private_index_in_the_project_covers_every_file_v02_did_not_read(write, tmp_path, name):
+    """A file that names no index may be installed with one that does. So its names
+    are not sent either, also when it is the only file that is checked (pre-commit)."""
+    path = write(name, INHERITING[name])
+    write("deploy/requirements.txt", INDEX + "corp-auth==1.4.0\n")
+    for paths in ([tmp_path], [path]):
+        registry = FakeRegistry(set())
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == []
+        assert result.notes == [
+            f"SLOP001 didn't look up the dependencies in {name}: a private package index is "
+            "set in deploy/requirements.txt, so names missing from PyPI may be private "
+            "packages. If that index only mirrors PyPI, set detect-private-index = false."
+        ]
+        assert "secret" not in result.notes[0]
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("pyproject.toml", f'[[tool.uv.index]]\nname = "corp"\nurl = "{PRIVATE}"\n'),
+        ("Pipfile", f'[[source]]\nname = "corp"\nurl = "{PRIVATE}"\n'),
+        ("tools/Pipfile.lock", json.dumps({"_meta": {"sources": [{"url": PRIVATE}]}})),
+        ("requirements/prod.in", f"--index-url {PRIVATE}\ncorp-core>=1\n"),
+    ],
+)
+def test_every_file_that_can_name_an_index_is_inherited_from(write, check, name, body):
+    """The index may be in pyproject.toml, a Pipfile, a Pipfile.lock or any requirements file."""
+    write(name, body)
+    write("setup.cfg", "[options]\ninstall_requires =\n    corp-auth\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert f"a private package index is set in {name}" in result.notes[0]
+
+
+def test_the_files_v02_read_do_not_inherit(write, check):
+    """``requirements*.txt`` and ``pyproject.toml`` speak for themselves, as in v0.2: an
+    index in another file does not switch them off."""
+    write("deploy/requirements.txt", INDEX + "corp-auth\n")
+    write("requirements.txt", "ghost-one\n")
+    write("requirements-dev.txt", "ghost-two\n")
+    write("pyproject.toml", '[project]\nname = "demo"\ndependencies = ["ghost-three"]\n')
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert [f.subject for f in result.findings] == ["ghost-three", "ghost-two", "ghost-one"]
+    assert "corp-auth" not in registry.queries and result.notes == []
+
+
+def test_an_index_in_an_excluded_file_is_not_inherited(write, check):
+    """``exclude`` is how a user says a folder is not part of the project."""
+    write("vendor/tool/requirements.txt", INDEX + "x\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    ghost-lib\n")
+    covered = check("SLOP001", registry=FakeRegistry(set()))
+    assert covered.findings == [] and len(covered.notes) == 1
+    result = check("SLOP001", registry=FakeRegistry(set()), exclude=["vendor"])
+    assert found(result) == [("setup.cfg", 3, 1)] and result.notes == []
+
+
+@pytest.mark.parametrize("folder", ["build", "dist", "env", "venv", ".tox", "x.egg-info"])
+def test_an_index_in_a_folder_that_is_never_read_is_not_inherited(write, check, folder):
+    """Build output and virtual environments are never walked, so a requirements file
+    in one of them says nothing about the project."""
+    write(f"{folder}/requirements.txt", INDEX + "x\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    ghost-lib\n")
+    result = check("SLOP001", registry=FakeRegistry(set()))
+    assert found(result) == [("setup.cfg", 3, 1)] and result.notes == []
+
+
+def test_detect_private_index_false_switches_inheritance_off(write, check):
+    """An index that only mirrors PyPI must not switch the new files off. The file
+    that names the index stays private."""
+    write("requirements.txt", INDEX + "corp-auth\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    ghost-lib\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, inherit_index=False)
+    assert found(result) == [("setup.cfg", 3, 1)] and result.notes == []
+    assert registry.queries == ["ghost-lib"]
+    # Imports are another matter: the switch does not bring their lookups back.
+    write("app.py", "import ghost_mod\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, inherit_index=False, check_imports=True)
+    assert found(result) == [("setup.cfg", 3, 1)] and registry.queries == ["ghost-lib"]
+    assert "didn't look up imports on PyPI: requirements.txt uses" in result.notes[0]
+
+
+def test_cli_passes_detect_private_index_on(tmp_path, monkeypatch, capsys):
+    """``--no-detect-private-index`` and the config key reach the inheritance rule."""
+    (tmp_path / "requirements.txt").write_text(INDEX + "corp-auth\n", encoding="utf-8")
+    (tmp_path / "constraints.txt").write_text("ghost-pin==1.0\n", encoding="utf-8")
+    cache = tmp_path / "cache" / "slopfence"
+    cache.mkdir(parents=True)
+    (cache / "pypi.json").write_text(json.dumps({"ghost-pin": [False, 9e12]}), encoding="utf-8")
+    monkeypatch.setenv("SLOPFENCE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(PyPIRegistry, "_query", lambda self, key: pytest.fail(f"lookup of {key}"))
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["findings"] == [] and "constraints.txt" in report["notes"][0]
+    assert main([".", "--format", "json", "--no-detect-private-index"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert [f["path"] for f in report["findings"]] == ["constraints.txt"]
+    assert report["notes"] == []
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.slopfence]\ndetect-private-index = false\n", encoding="utf-8"
+    )
+    assert main([".", "--format", "json"]) == 1
+    capsys.readouterr()
+
+
+def test_the_note_names_only_checked_files_and_stays_short(write, tmp_path):
+    """The note lists the files whose names were held back in this run, three at most,
+    and comes with no run that asks PyPI nothing anyway."""
+    write("requirements.txt", INDEX + "corp-auth\n")
+    for n in range(5):
+        write(f"pkg{n}/setup.cfg", "[options]\ninstall_requires =\n    corp-auth\n")
+    write("empty/setup.cfg", "[options]\npackages = find:\n")
+    write("known/setup.cfg", "[options]\ninstall_requires =\n    known-lib\n")
+    known = ["known-*"]
+    result = run([tmp_path / "pkg3"], tmp_path, FakeRegistry(set()), known_packages=known)
+    assert "the dependencies in pkg3/setup.cfg: a private" in result.notes[0]
+    result = run([tmp_path], tmp_path, FakeRegistry(set()), known_packages=known)
+    assert "in pkg0/setup.cfg, pkg1/setup.cfg, pkg2/setup.cfg and 2 more files:" in result.notes[0]
+    # Nothing was held back in a file without names to look up.
+    paths = [tmp_path / "empty", tmp_path / "known"]
+    result = run(paths, tmp_path, FakeRegistry(set()), known_packages=known)
+    assert result.notes == []
+    # Offline, and with a private index in the environment, nothing is looked up anyway.
+    assert run([tmp_path], tmp_path, DownRegistry(), select=["SLOP001"]).notes != []
+    assert run([tmp_path], tmp_path, OfflineRegistry(), select=["SLOP001"]).notes == []
+    result = run([tmp_path], tmp_path, FakeRegistry(set()), private_index="the X variable")
+    assert len(result.notes) == 1 and "made no PyPI lookups" in result.notes[0]
+
+
+def test_dependency_links_stop_import_lookups(write, check, not_installed):
+    """``dependency_links`` say packages may come from elsewhere: that file's packages
+    are private, and with ``check_imports`` unknown imports may be private too."""
+    write(
+        "setup.py",
+        "from setuptools import setup\n"
+        "setup(install_requires=['corp-a'], dependency_links=['https://corp.example/d'])\n",
+    )
+    write("requirements.txt", "ghost-lib\n")
+    write("app.py", "import corp_mod_zz\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    # It only speaks for itself: requirements.txt is still checked.
+    assert found(result) == [("requirements.txt", 1, 1)] and registry.queries == ["ghost-lib"]
+    assert result.notes == [
+        "SLOP001 didn't look up imports on PyPI: setup.py uses a private package index, so "
+        "unknown imports may be private packages."
+    ]
+
+
+REQUIRES = "install_requires =\n    corp-auth\nsetup_requires = corp-build\n"
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        f"[easy_install]\nindex_url = {PRIVATE}\n\n[options]\n{REQUIRES}",
+        f"[easy_install]\nindex-url = {PRIVATE}\n\n[options]\n{REQUIRES}",
+        f"[easy_install]\nfind_links = https://corp.example/wheels\n\n[options]\n{REQUIRES}",
+        f"[easy_install]\nFind-Links =\n    ./wheels\n\n[options]\n{REQUIRES}",
+        f"[options]\ndependency_links = https://corp.example/links\n{REQUIRES}",
+    ],
+    ids=["index_url", "index-url", "find_links", "Find-Links", "dependency_links"],
+)
+def test_a_setup_cfg_that_names_a_source_covers_the_setup_py_next_to_it(write, tmp_path, cfg):
+    """setuptools reads ``setup.cfg`` and the ``setup.py`` next to it as one
+    distribution. An index or links in the first hold for the names in the second,
+    also when only one of the two is checked. A ``setup.py`` elsewhere is not covered."""
+    cfg_path = write("pkg/setup.cfg", cfg)
+    setup = "from setuptools import setup\nsetup(name='x', install_requires=['corp-core'])\n"
+    py_path = write("pkg/setup.py", setup)
+    for paths in ([tmp_path], [cfg_path], [py_path]):
+        registry = FakeRegistry(set())
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == [] and result.notes == []
+    write("other/setup.py", setup.replace("corp-core", "ghost-lib"))
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert found(result) == [("other/setup.py", 2, 35)] and registry.queries == ["ghost-lib"]
+
+
+def test_a_setup_py_with_links_covers_the_setup_cfg_next_to_it(write, check):
+    """The same the other way round: ``dependency_links`` passed to ``setup()``."""
+    write(
+        "setup.py", "from setuptools import setup\nsetup(dependency_links=['https://c.example'])\n"
+    )
+    write("setup.cfg", f"[options]\n{REQUIRES}")
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+
+
+def test_an_easy_install_index_that_is_pypi_changes_nothing(write, check):
+    """``index_url`` with PyPI's own address, or with no value, names no other source."""
+    for index in ("index_url = https://pypi.org/simple", "index_url ="):
+        write("setup.cfg", f"[easy_install]\n{index}\n\n[options]\ninstall_requires = ghost-lib\n")
+        registry = FakeRegistry(set())
+        assert found(check("SLOP001", registry=registry)) == [("setup.cfg", 5, 1)]
+        assert registry.queries == ["ghost-lib"]
+
+
+@pytest.mark.parametrize("links", ["[]", "()", "''", "None"])
+def test_empty_dependency_links_name_no_source(write, check, not_installed, links):
+    """``dependency_links=[]`` is what a project template leaves behind. It holds no
+    link, so the file's packages are looked up, and imports too."""
+    write(
+        "setup.py",
+        "from setuptools import setup\n"
+        f"setup(name='demo', install_requires=['ghost-a'], dependency_links={links})\n",
+    )
+    write("app.py", "import ghost_mod_zz\n")
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert [f.subject for f in result.findings] == ["ghost_mod_zz", "ghost-a"]
+    assert result.notes == []
+
+
+@pytest.mark.parametrize("links", ["LINKS", "find_links()", "[url]", "['']", "[] + extra"])
+def test_dependency_links_that_may_hold_a_link_name_a_source(write, check, links):
+    """Anything but a literal that is certainly empty may hold a link."""
+    write("setup.py", f"from setuptools import setup\nsetup(dependency_links={links})\n")
+    write("setup.cfg", "[options]\ninstall_requires = corp-auth\n")
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+
+
+def test_lock_files_are_only_read_for_what_the_run_needs(write, check, monkeypatch):
+    """Without ``check_imports`` nobody asks for the names in a lock file. Only
+    ``Pipfile.lock`` is read then, because it can name an index."""
+    from slopfence.detectors import packages
+
+    read = []
+    real = packages.parse_lock_file
+    monkeypatch.setattr(
+        packages, "parse_lock_file", lambda path: read.append(path.name) or real(path)
+    )
+    write("uv.lock", '[[package]]\nname = "idna"\n')
+    write("poetry.lock", '[[package]]\nname = "six"\n')
+    write("Pipfile.lock", json.dumps({"_meta": {"sources": []}, "default": {"certifi": {}}}))
+    write("requirements.txt", "ghost-lib\n")
+    assert found(check("SLOP001", registry=FakeRegistry(set()))) == [("requirements.txt", 1, 1)]
+    assert read == ["Pipfile.lock"]
+    read.clear()
+    check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert sorted(read) == ["Pipfile.lock", "poetry.lock", "uv.lock"]
+
+
+# --- The project's own packages ---------------------------------------------------------
+
+OWN_NAMES = {
+    "packages/core/setup.py": "from setuptools import setup\nsetup(name='Acme_Core')\n",
+    "packages/util/setup.cfg": "[metadata]\nname = acme.util\n",
+    "packages/cli/pyproject.toml": '[project]\nname = "acme-cli"\n',
+    "packages/old/pyproject.toml": '[tool.poetry]\nname = "acme-old"\n',
+}
+SIBLINGS = "acme-core\nacme-util\nacme_cli\nACME-old\nrequests\nghost-lib\n"
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("requirements.txt", SIBLINGS),
+        ("requirements/base.in", SIBLINGS),
+        ("setup.cfg", "[options]\ninstall_requires =\n    " + SIBLINGS.replace("\n", "\n    ")),
+        (
+            "setup.py",
+            f"from setuptools import setup\nsetup(install_requires={SIBLINGS.split()!r})\n",
+        ),
+        ("Pipfile", "[packages]\n" + "".join(f'{n} = "*"\n' for n in SIBLINGS.split())),
+        (
+            "pyproject.toml",
+            f'[project]\nname = "app"\ndependencies = {json.dumps(SIBLINGS.split())}\n',
+        ),
+    ],
+)
+def test_packages_of_the_same_repository_are_never_looked_up(write, tmp_path, name, body):
+    """A dependency that another ``setup.py``, ``setup.cfg`` or ``pyproject.toml`` of the
+    project defines is not a hallucination, and its name is not sent. That holds for
+    every source, and when only one file is checked."""
+    for rel, text in OWN_NAMES.items():
+        write(rel, text)
+    path = write(f"app/{name}", body)
+    for paths in ([tmp_path], [path]):
+        registry = FakeRegistry({"requests"})
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert [f.subject for f in result.findings] == ["ghost-lib"]
+        assert sorted(set(registry.queries)) == ["ghost-lib", "requests"]
+
+
+def test_own_names_count_in_excluded_folders_too(write, check):
+    """An excluded package is still a package of this repository."""
+    write("vendor/acme/setup.py", "from setuptools import setup\nsetup(name='acme-vendored')\n")
+    write("requirements.txt", "acme-vendored\n")
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry, exclude=["vendor"]).findings == []
+    assert registry.queries == []
+
+
+# --- A package that one file takes from a place of its own -----------------------------
+
+GIT = "git+https://git.corp.example/corp/corp-auth.git"
+# Each file says where ``corp-auth`` comes from, in its own way.
+SOURCED = {
+    "direct reference": ("requirements.txt", f"corp-auth @ {GIT}@v1\nrequests\n"),
+    "egg": ("requirements.txt", f"-e {GIT}#egg=corp-auth\nrequests\n"),
+    "Pipfile git": ("Pipfile", f'[packages]\ncorp-auth = {{git = "{GIT}"}}\nrequests = "*"\n'),
+    "pyproject URL": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\n'
+        'dependencies = ["corp-auth @ https://corp.example/corp_auth-1.0.whl", "requests"]\n',
+    ),
+    "uv source": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["corp-auth", "requests"]\n\n'
+        f'[tool.uv.sources]\ncorp-auth = {{ git = "{GIT}" }}\n',
+    ),
+    "uv explicit index": (
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["corp-auth", "requests"]\n\n'
+        f'[[tool.uv.index]]\nname = "corp"\nurl = "{PRIVATE}"\nexplicit = true\n\n'
+        '[tool.uv.sources]\ncorp-auth = { index = "corp" }\n',
+    ),
+    "Poetry explicit source": (
+        "pyproject.toml",
+        '[tool.poetry]\nname = "demo"\n\n[tool.poetry.dependencies]\nrequests = "*"\n'
+        'corp-auth = { version = "^1", source = "corp" }\n\n'
+        f'[[tool.poetry.source]]\nname = "corp"\nurl = "{PRIVATE}"\npriority = "explicit"\n',
+    ),
+    "setup.cfg direct reference": (
+        "setup.cfg",
+        f"[options]\ninstall_requires =\n    corp-auth @ {GIT}\n    requests\n",
+    ),
+}
+# The files that name the package again, without saying where it comes from.
+NAMED_AGAIN = {
+    "legacy/setup.py": (
+        'from setuptools import setup\nsetup(name="old", install_requires=["corp-auth>=1"])\n'
+    ),
+    "tools/setup.cfg": "[options]\ninstall_requires =\n    corp-auth\n",
+    "constraints.txt": "corp-auth==1.2.3\nrequests==2.32.0\n",
+    "requirements.in": "Corp_Auth\nrequests\n",
+    "tools/Pipfile": '[packages]\ncorp-auth = "*"\n',
+    "docs/requirements.txt": "corp-auth\n",
+    "sub/pyproject.toml": '[project]\nname = "sub"\ndependencies = ["corp-auth"]\n',
+}
+
+
+@pytest.mark.parametrize("layout", sorted(SOURCED))
+def test_a_package_with_a_source_of_its_own_is_not_looked_up_in_any_file(write, tmp_path, layout):
+    """One file installs ``corp-auth`` from git, a URL or an index it names. The same
+    name in another file is the same package, so it is never sent and never reported:
+    in the files v0.2 read, in the new ones, and when a single file is checked."""
+    name, body = SOURCED[layout]
+    write(name, body)
+    again = [write(rel, text) for rel, text in NAMED_AGAIN.items()]
+    for paths in ([tmp_path], *([path] for path in again)):
+        registry = FakeRegistry({"requests"})
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and set(registry.queries) <= {"requests"}
+        assert result.notes == []
+
+
+def test_a_name_held_back_for_another_reason_is_still_looked_up_elsewhere(write, check):
+    """Only an entry that says where its package comes from speaks for other files. A
+    file-wide ``--find-links``, or an ignore comment, covers its own line and no more."""
+    write("requirements.txt", "--find-links ./wheels\nghost-one\n")
+    write("requirements-dev.txt", "ghost-two  # slopfence: ignore\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    ghost-one\n    ghost-two\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("setup.cfg", 3, 1), ("setup.cfg", 4, 1)]
+    assert sorted(registry.queries) == ["ghost-one", "ghost-two"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "tool = 3\n",
+        'project = "demo"\n',
+        "[project]\nname = 3\ndependencies = 5\n",
+        "[project]\noptional-dependencies = 3\n",
+        "[project.optional-dependencies]\ndev = 3\n",
+        "[dependency-groups]\ndev = 3\n",
+        "[tool]\npoetry = 3\nuv = 4\n",
+        "[tool.poetry]\nname = 3\ndependencies = 3\ngroup = 3\n",
+        "[tool.poetry.group]\ndev = 3\n",
+        "[tool.uv]\nsources = 3\n",
+    ],
+)
+def test_a_pyproject_with_another_shape_does_not_stop_the_run(write, check, body):
+    """Every ``pyproject.toml`` of the project is read, also a test fixture in an
+    excluded folder. One with the wrong shape is read as far as it goes."""
+    write("tests/fixtures/broken/pyproject.toml", body)
+    write("requirements.txt", "ghost-lib\n")
+    result = check("SLOP001", registry=FakeRegistry(set()), exclude=["tests/fixtures/"])
+    assert found(result) == [("requirements.txt", 1, 1)]
+
+
+DEEP = "x = " + "[" * 5000 + "]" * 5000 + "\n"
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("pyproject.toml", DEEP),
+        ("pyproject.toml", "x = " + "9" * 10_000 + "\n"),
+        ("Pipfile", DEEP),
+        ("uv.lock", DEEP),
+        ("uv.lock", "package = 3\n"),
+        ("Pipfile.lock", "[" * 100_000),
+        ("Pipfile.lock", '{"default": 3, "_meta": {"sources": 4}}'),
+    ],
+    ids=[
+        "nested pyproject.toml",
+        "huge number",
+        "nested Pipfile",
+        "nested uv.lock",
+        "uv.lock with another shape",
+        "nested JSON",
+        "Pipfile.lock with another shape",
+    ],
+)
+def test_a_file_the_toml_or_json_reader_gives_up_on_does_not_stop_the_run(write, check, name, text):
+    """A generated file with thousands of nested brackets, or a number of ten thousand
+    digits, is not one the reader takes. It is skipped, wherever in the project it is."""
+    write(f"tests/fixtures/odd/{name}", text)
+    write("requirements.txt", "ghost-lib\n")
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert found(result) == [("requirements.txt", 1, 1)]
+
+
+# --- --diff, exclude, baseline, SARIF ---------------------------------------------------
+
+
+def test_diff_and_exclude(write, check):
+    """Findings follow --diff line by line, files outside the diff aren't looked up,
+    and exclude patterns apply to the new files."""
+    write("setup.cfg", "[options]\ninstall_requires =\n    ghost-old\n    ghost-new\n")
+    write("Pipfile", "[packages]\nghost-pip = '*'\n")
+    write("requirements.txt", "ghost-req\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, changed={"setup.cfg": {4}})
+    assert found(result) == [("setup.cfg", 4, 1)]
+    assert sorted(registry.queries) == ["ghost-new", "ghost-old"]
+    result = check("SLOP001", registry=FakeRegistry(set()), exclude=["setup.cfg", "*.txt"])
+    assert found(result) == [("Pipfile", 2, 1)]
+
+
+def test_a_baseline_hides_findings_of_the_new_sources(tmp_path, monkeypatch, capsys):
+    """A finding in setup.py or setup.cfg is about its package, so a baseline still
+    matches it when the line moves."""
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\nsetup(install_requires=['Ghost_Lib'])\n", encoding="utf-8"
+    )
+    (tmp_path / "setup.cfg").write_text(
+        "[options]\ninstall_requires =\n    ghost-cfg\n", encoding="utf-8"
+    )
+    cache = tmp_path / "cache" / "slopfence"
+    cache.mkdir(parents=True)
+    answers = {"ghost-lib": [False, 9e12], "ghost-cfg": [False, 9e12], "ghost-new": [False, 9e12]}
+    (cache / "pypi.json").write_text(json.dumps(answers), encoding="utf-8")
+    monkeypatch.setenv("SLOPFENCE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--write-baseline", "baseline.json"]) == 0
+    capsys.readouterr()
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\n\n\n"
+        "setup(\n    install_requires=['Ghost_Lib', 'ghost-new'],\n)\n",
+        encoding="utf-8",
+    )
+    assert main([".", "--baseline", "baseline.json", "--format", "json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert [(f["path"], f["line"]) for f in report["findings"]] == [("setup.py", 5)]
+    assert "ghost-new" in report["findings"][0]["message"] and report["baselined"] == 2
+
+
+def test_a_dependency_file_outside_the_project_is_still_checked(write, tmp_path):
+    """``slopfence . ../shared/constraints.txt``: the file is not part of the project,
+    and it is checked because it was named. So it is when single files are named."""
+    own = write("app/requirements.txt", "requests\n")
+    shared = write("shared/constraints.txt", "ghost-pin==1.0\n")
+    for paths in ([tmp_path / "app", shared], [own, shared]):
+        result = run(paths, tmp_path / "app", FakeRegistry({"requests"}))
+        outside = shared.resolve().as_posix()  # reported with its full path
+        assert [(f.path, f.subject) for f in result.findings] == [(outside, "ghost-pin")]
+        assert result.files_checked == 2
+
+
+def test_sarif_location_of_a_setup_py_finding(tmp_path, monkeypatch, capsys):
+    """SARIF carries the real line and column."""
+    (tmp_path / "setup.py").write_text(
+        "from setuptools import setup\n\nsetup(install_requires=['requests', 'ghost-lib'])\n",
+        encoding="utf-8",
+    )
+    cache = tmp_path / "cache" / "slopfence"
+    cache.mkdir(parents=True)
+    (cache / "pypi.json").write_text(
+        json.dumps({"requests": [True, 9e12], "ghost-lib": [False, 9e12]}), encoding="utf-8"
+    )
+    monkeypatch.setenv("SLOPFENCE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.chdir(tmp_path)
+    assert main([".", "--format", "sarif"]) == 1
+    [res] = json.loads(capsys.readouterr().out)["runs"][0]["results"]
+    location = res["locations"][0]["physicalLocation"]
+    assert location["artifactLocation"]["uri"] == "setup.py"
+    assert location["region"] == {"startLine": 3, "startColumn": 37}

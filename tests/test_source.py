@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import slopfence
-from slopfence.source import child_statements, children, load, walk
+from slopfence.source import char_column, child_statements, children, load, walk
 
 # Every place a statement can sit: bodies, ``else`` and ``finally`` blocks, ``except``
 # handlers and ``match`` cases. Lambdas and comprehensions hold expressions only.
@@ -155,3 +155,15 @@ def test_warning_filters_do_not_decide_what_parses(write, tmp_path, action):
         src = load(path, tmp_path)
     assert src is not None and src.tree.body
     assert shown == []
+
+
+def test_char_column_counts_characters_where_ast_counts_bytes():
+    """``ast`` gives a column as a UTF-8 byte offset. Text before it that is not ASCII
+    takes more bytes than characters."""
+    line = 'x = "caf\u00e9 \U0001f600"; import os'
+    node = ast.parse(line).body[1]
+    assert (
+        node.col_offset == line.index("import") + 4
+    )  # one byte more for \u00e9, three for the emoji
+    assert char_column(line, node.col_offset) == line.index("import")
+    assert char_column("plain", 3) == 3 and char_column("", 0) == 0
