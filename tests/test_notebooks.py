@@ -160,6 +160,36 @@ def test_pip_install_lines_special_cases(line, expected):
     assert pip(line) == expected
 
 
+@pytest.mark.parametrize(
+    ("line", "unnamed"),
+    [
+        ("pip install requests 'flask[async]==2.*'", False),
+        ("pip install -q -U --no-deps requests -c constraints.txt", False),
+        ("pip install git+https://x.example/r.git#egg=repo", False),
+        ("pip install -i https://corp.example/simple corp", False),
+        # A URL or a path that does not say what it installs.
+        ("pip install git+https://github.com/x/detectron_zz.git", True),
+        ("pip install https://example.com/y.whl requests", True),
+        ("pip install .", True),
+        ("pip install ./dist/x.whl", True),
+        # Options that install what another file or folder lists.
+        ("pip install -r requirements.txt", True),
+        ("pip install -rrequirements.txt foo", True),
+        ("pip install --editable=.", True),
+        ("pip install -e git+https://x.example/r.git#egg=repo", True),
+        ("uv pip install --group dev", True),
+        # A variable, and a command that was not read.
+        ("pip install $PKG", True),
+        ("pip install --some-new-flag pkg", True),
+    ],
+)
+def test_commands_that_install_something_without_a_name(line, unnamed):
+    """Whether a command installs something that it gives no name for here. What
+    such a command brings in can't be told from an import that nothing provides."""
+    [words] = shell_commands(line, 0)[0]
+    assert pip_requirements(pip_install_arguments(words)).unnamed is unnamed
+
+
 def test_shell_words_know_where_they_are():
     """Each word carries where it starts and ends in the line, quotes included."""
     line = "pip install 'a b' c"
@@ -178,7 +208,9 @@ def test_shell_words_know_where_they_are():
 CELLS = [
     "%pip install requests ghost-nb-lib\nimport requests\n",
     "import os, sys\nif 'google.colab' in sys.modules:\n"
-    "    !pip install -q \"gh\u00f6st\" 'tab\\tbed' ghost-two==1.0\n",
+    # Text that is not ASCII, and a backslash, in front of the last name.
+    "    !pip install -q \"ghost-one; extra == '\u00f6'\" 'ghost-tab; extra == \"a\\tb\"'"
+    " ghost-two==1.0\n",
     "%%bash\npip install ghost-three \\\n    ghost-four\necho done\n",
     "%%html\n<b>!pip install not-this</b>\n",
     'text = """\n!pip install in-a-string\n"""\n'
@@ -192,8 +224,8 @@ CELLS = [
     "%load_ext autoreload\nhelp_text = '''\npip install in-a-string-too\n'''\n",
 ]
 NAMES = [
-    "requests", "ghost-nb-lib", "ghost-two", "ghost-three", "ghost-four", "automagic-pkg",
-    "still-found", "ghost-five", "ghost-six",
+    "requests", "ghost-nb-lib", "ghost-one", "ghost-tab", "ghost-two", "ghost-three",
+    "ghost-four", "automagic-pkg", "still-found", "ghost-five", "ghost-six",
 ]  # fmt: skip
 IMPORTS = ["requests", "os", "sys", "ghost_import", "numpy"]
 
@@ -543,6 +575,47 @@ def test_notebook_imports_need_check_imports(write, check, not_installed):
     first = result.findings[0].line
     result = check("SLOP001", registry=registry, check_imports=True, changed={"nb.ipynb": {first}})
     assert [f.line for f in result.findings] == [first]
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        ["%%writefile my_train_utils.py\ndef f():\n    return 1\n", "import my_train_utils\n"],
+        ["from helpers.plots import draw\n", "%%writefile -a helpers/plots.py\ndraw = print\n"],
+        ["%%file tools.py\nx = 1\n", "import tools\n"],
+        ["!pip install git+https://github.com/x/detectron_zz.git\n", "import detectron_zz\n"],
+        ["!pip install --some-new-flag pkg_zz\n", "import pkg_zz\n"],
+        ["%pip install -r requirements.txt\n", "import from_the_file\n"],
+        ["%pip install -q -e .\n", "import this_project\n"],
+        ["%%bash\npip install $EXTRA\n", "import whatever_extra_is\n"],
+    ],
+    ids=["writefile", "writefile in a folder", "file", "URL", "option", "-r", "-e", "variable"],
+)
+def test_imports_a_notebook_provides_itself_are_not_looked_up(write, check, not_installed, cells):
+    """A module that a cell writes belongs to the notebook. And when a pip line
+    installs something without a name here, any import may come from there. In both
+    cases the import is no finding, and its name is not sent."""
+    write("demo.ipynb", jupyter(cells))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert result.findings == [] and registry.queries == []
+
+
+def test_a_notebook_whose_installs_all_have_names_has_its_imports_looked_up(
+    write, check, not_installed
+):
+    """The look-alike cases: a file that is no module, a cell magic with another
+    name, and pip lines that name everything they install."""
+    cells = [
+        "%%writefile notes.txt\nghost_text\n",
+        "%%writefile_like ghost_magic.py\n",
+        "%pip install -q requests 'named @ git+https://x.example/n.git' -c constraints.txt\n",
+        "import ghost_text, ghost_magic, ghost_named, requests, named\n",
+    ]
+    write("demo.ipynb", jupyter(cells))
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost_magic", "ghost_named", "ghost_text"]
 
 
 def test_which_notebooks_are_read(write, tmp_path, not_installed, monkeypatch):

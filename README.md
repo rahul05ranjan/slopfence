@@ -197,6 +197,7 @@ Known limit: a list for another tool whose names mostly exist on PyPI too (`git`
 
 - Only `SLOP001` reads notebooks, and only their code cells.
 - A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. An index or links option in it still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`, `%PKG%`), none of its names is looked up.
+- With `--check-imports`, a module that a cell writes (`%%writefile utils.py`) is the notebook's own. And the imports of a notebook are not looked up at all when one of its `pip install` lines installs something without a name: a path, a URL without `#egg=`, `-r requirements.txt`, `-e .`, a variable, or a command with an option slopfence doesn't know. Any import may come from there.
 - A notebook larger than 20 MB is not read, and a note says so.
 - To leave notebooks out, add `"*.ipynb"` to `exclude`.
 

@@ -75,6 +75,10 @@ INDEX_OPTIONS = frozenset(
 )
 # Options that add files or pages to install from, whatever their value is.
 LINK_OPTIONS = frozenset({"-f", "--find-links", "--no-index", "--process-dependency-links"})
+# Options that install what a file or a folder lists. Its packages have no name here.
+UNNAMED_OPTIONS = frozenset(
+    {"-r", "--requirement", "--requirements", "-e", "--editable", "--group"}
+)
 
 
 def shell_commands(text: str, i: int) -> tuple[list[list[Word]], int]:
@@ -175,6 +179,9 @@ class PipInstall:
     # (start, end) of each index or links option, with its value where it was read.
     # What these words say about package sources is in the two fields above.
     source_options: list[tuple[int, int]] = field(default_factory=list)
+    # The command also installs something that has no name here: a path, a URL, the
+    # packages of a requirements file, what a variable holds. Or it was not read.
+    unnamed: bool = False
 
 
 def _short_options(cluster: str) -> tuple[str, str | None] | None:
@@ -218,7 +225,7 @@ def _unread(arguments: list[Word]) -> PipInstall:
     An index or links option among its words still says that packages may come
     from another place than PyPI, whatever its value is.
     """
-    found = PipInstall()
+    found = PipInstall(unnamed=True)
     for word in arguments:
         option = word.text.partition("=")[0]
         index = option in INDEX_OPTIONS or option[:2] == "-i"
@@ -244,6 +251,8 @@ def pip_requirements(arguments: list[Word]) -> PipInstall:
         if only_names or not text.startswith("-") or text == "-":
             if package := _package(word):
                 found.packages.append(package)
+            else:
+                found.unnamed = True
             continue
         if text == "--":
             only_names = True
@@ -267,5 +276,7 @@ def pip_requirements(arguments: list[Word]) -> PipInstall:
         if option in INDEX_OPTIONS or option in LINK_OPTIONS:
             found.links = found.links or option in LINK_OPTIONS
             found.source_options.append((word.start, last.end))
+        found.unnamed = found.unnamed or option in UNNAMED_OPTIONS
     found.variables = any(_UNEXPANDED.search(word.text) for word in arguments)
+    found.unnamed = found.unnamed or found.variables
     return found

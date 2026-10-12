@@ -20,7 +20,7 @@ import re
 from bisect import bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
     Dependency,
@@ -252,6 +252,8 @@ _AUTOMAGIC = re.compile(r"pip\s+install\b")
 # Cell magics whose body is still Python.
 _PYTHON_CELL_MAGICS = {"time", "timeit", "capture", "prun", "debug", "python", "python3"}
 _CELL_MAGIC = re.compile(r"\s*%%(\w*)")
+# Cell magics that save the cell's body as a file.
+_FILE_CELL_MAGICS = {"writefile", "file"}
 _ASSIGNED_COMMAND = re.compile(r"\s*[A-Za-z_][\w.,\s\[\]]*=\s*[!%]")
 # Expressions that hold string text over several lines (t-strings since Python 3.14).
 _STRINGS = tuple(
@@ -271,6 +273,8 @@ class CellView:
     imports: list[tuple[str, int, int]] = field(default_factory=list)
     # The lines of the cell (1-based) with an ignore comment that covers SLOP001.
     ignored: set[int] = field(default_factory=set)
+    # The modules the cell writes: ``%%writefile pkg/mod.py`` gives ``pkg`` and ``mod``.
+    written: set[str] = field(default_factory=set)
 
 
 def _is_magic_line(stripped: str) -> bool:
@@ -338,7 +342,11 @@ def view_cell(text: str, want_imports: bool) -> CellView:
             offset += len(line) + 1
         return view
     if magic and magic.group(1) not in _PYTHON_CELL_MAGICS:
-        return view  # %%html, %%writefile, %%sql...: not Python, not shell
+        # %%html, %%writefile, %%sql...: not Python, not shell.
+        target = PurePosixPath(lines[0].split()[-1])
+        if magic.group(1) in _FILE_CELL_MAGICS and target.suffix == ".py":
+            view.written = {target.stem, *target.parts[:-1]}
+        return view
 
     python, commands = _without_magics(lines, skip_first=bool(magic))
     # A cell that is Python as it stands has no commands: a "!pip" line in valid
@@ -428,7 +436,10 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
     The notebook's packages are private, all of them, when one of its commands
     names another source than PyPI, or when a cell sets an index in a way that
     can't be followed (``pip config``, an environment variable, a ``pip.conf``).
-    Then no import is returned either.
+    Then no import is returned either. Nor is one when a command installs something
+    without a name here (a path, a URL, a requirements file): an import that
+    nothing provides may come from there. A module that a cell writes
+    (``%%writefile utils.py``) is the notebook's own.
 
     ``# slopfence: ignore-file`` anywhere in a code cell covers the notebook. A cell
     may be a shell script, or not Python at all, so the words count wherever they
@@ -439,16 +450,19 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
     if notebook is None:
         return found
     ignore_file = any(IGNORE_FILE_RE.search(cell.text) for cell in notebook.cells)
-    links = False
+    links = unnamed = False
+    written: set[str] = set()
     for cell in notebook.cells:
         understood: list[tuple[int, int]] = []
         # Without a pip line, the cell needn't be parsed.
         if want_imports or "pip" in cell.text:
             view = view_cell(cell.text, want_imports)
+            written |= view.written
             for install, ignored in _installs(cell, view):
                 understood += install.source_options
                 found.private_index = found.private_index or install.private_index
                 links = links or install.links
+                unnamed = unnamed or install.unnamed
                 for name, word, sourced in install.packages:
                     at = cell.text.find(name, word.start)
                     line, col = notebook.position(cell, at if at != -1 else word.start)
@@ -475,6 +489,7 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
     for dep in found.dependencies:
         dep.validate = dep.validate and not private
         dep.suppressed = dep.suppressed or ignore_file
-    if private or ignore_file:
+    if private or ignore_file or unnamed:
         found.imports = []
+    found.imports = [entry for entry in found.imports if entry[0] not in written]
     return found
