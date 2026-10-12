@@ -18,6 +18,7 @@ from slopfence.detectors.dependency import (
     Dependency,
     DependencyFile,
     Kind,
+    Requirement,
     parse_requirement,
     requirements_comment,
     suppresses_slop001,
@@ -108,11 +109,13 @@ def _cfg_comments(text: str) -> list[str]:
     return comments
 
 
-def _cfg_requirements(lines: list[_ValueLine]) -> Iterator[tuple[int, str]]:
-    """The (line number, requirement string) of each requirement in one option's value.
+def _cfg_requirements(lines: list[_ValueLine]) -> Iterator[tuple[int, Requirement]]:
+    """The (line number, requirement) of each requirement in one option's value.
 
     One requirement per line. A value that is all on the key's line is cut at ``;``,
-    as setuptools does: ``setup_requires = pbr; setuptools`` is two requirements.
+    as setuptools does: ``setup_requires = pbr; setuptools`` is two requirements. So
+    is ``pytest; python_version < 3``, where the second part was meant as a marker:
+    a part after the first that starts with a marker variable is not a package.
     """
     if lines[0][1].startswith("file:"):
         return  # the list lives in another file, which is checked on its own
@@ -121,8 +124,10 @@ def _cfg_requirements(lines: list[_ValueLine]) -> Iterator[tuple[int, str]]:
         spec = REQ_COMMENT.sub("", value)
         if "%(" in spec:
             continue  # configparser interpolation: the real value isn't known
-        for chunk in spec.split(";") if one_line else [spec]:
-            yield lineno, chunk
+        for n, chunk in enumerate(spec.split(";") if one_line else [spec]):
+            parsed = parse_requirement(chunk)
+            if parsed and not (n and parsed.name in MARKER_NAMES):
+                yield lineno, parsed
 
 
 def parse_setup_cfg(text: str, rel: str) -> DependencyFile:
@@ -149,10 +154,7 @@ def parse_setup_cfg(text: str, rel: str) -> DependencyFile:
             or section == "options.extras_require"
         ):
             continue
-        for lineno, spec in _cfg_requirements(lines):
-            parsed = parse_requirement(spec)
-            if parsed is None or parsed.name in MARKER_NAMES:
-                continue
+        for lineno, parsed in _cfg_requirements(lines):
             found.dependencies.append(
                 Dependency(
                     parsed.name,

@@ -547,6 +547,11 @@ def test_setup_cfg_marker_on_a_line_of_a_list_is_one_requirement(write, tmp_path
     """In a list with one requirement per line, ``;`` starts that line's marker."""
     path = write("setup.cfg", '[options]\ninstall_requires =\n    a; python_version < "3"\n    b\n')
     assert brief(path, tmp_path) == [("a", 3, True), ("b", 4, True)]
+    # A package may be called like a marker variable. Only a part after a ";" is doubted.
+    path = write("setup.cfg", "[options]\ninstall_requires =\n    extra\n    requests\n")
+    assert brief(path, tmp_path) == [("extra", 3, True), ("requests", 4, True)]
+    path = write("setup.cfg", "[options]\ninstall_requires = extra; requests\n")
+    assert brief(path, tmp_path) == [("extra", 2, True), ("requests", 2, True)]
 
 
 # --- setup.py ---------------------------------------------------------------------------

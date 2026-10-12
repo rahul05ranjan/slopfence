@@ -92,8 +92,7 @@ _LETTER = re.compile(r"[A-Za-z]")
 _FILE_ENDINGS = (".whl", ".zip", ".gz", ".bz2", ".xz", ".tgz", ".txt", ".in", ".toml", ".cfg")
 
 
-# The variables a PEP 508 marker may test (``python_version < "3.11"``). They are
-# never package names.
+# The variables a PEP 508 marker may test (``python_version < "3.11"``).
 MARKER_NAMES = frozenset(
     {
         "os_name",
