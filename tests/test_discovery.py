@@ -48,7 +48,7 @@ def test_nested_worktree_git_file_is_not_scanned(tmp_path):
     """A worktree (a .git file) inside the project is not this project's code."""
     project(tmp_path)
     nested_checkout(tmp_path, ".claude/worktrees/demo", "file")
-    found, _, _ = discover_all([tmp_path])
+    found, _, _ = discover_all([tmp_path], tmp_path)
     assert [p.relative_to(tmp_path).as_posix() for p in found] == ["src/helpers.py"]
     # No false SLOP030: the copy in the worktree is not compared against src/helpers.py.
     assert run([tmp_path], tmp_path, OfflineRegistry(), select=["SLOP030"]).findings == []
@@ -58,7 +58,7 @@ def test_nested_clone_git_directory_is_not_scanned(tmp_path):
     """A clone (a .git directory) inside the project is not this project's code."""
     project(tmp_path)
     nested_checkout(tmp_path, "vendor/library", "dir")
-    found, _, _ = discover_all([tmp_path])
+    found, _, _ = discover_all([tmp_path], tmp_path)
     assert [p.relative_to(tmp_path).as_posix() for p in found] == ["src/helpers.py"]
     assert run([tmp_path], tmp_path, OfflineRegistry(), select=["SLOP030"]).findings == []
 
@@ -82,3 +82,25 @@ def test_module_in_nested_checkout_is_not_a_local_module(tmp_path):
     (checkout / "src" / "thing.py").write_text("x = 1\n")
     result = run([tmp_path], tmp_path, FakeRegistry(set()), select=["SLOP001"], check_imports=True)
     assert rule_lines(result, "SLOP001") == [1]
+
+
+def test_dependency_files_in_nested_checkout_are_not_the_projects(tmp_path):
+    """A nested checkout's private index and package name say nothing about this project.
+
+    If they did, the index would stop the lookup of ``ghost-lib`` and the name would
+    make ``other-copy`` one of the project's own packages.
+    """
+    (tmp_path / "setup.cfg").write_text(
+        "[options]\ninstall_requires =\n    ghost-lib\n    other-copy\n"
+    )
+    checkout = nested_checkout(tmp_path, "vendor/library", "dir")
+    (checkout / "requirements.txt").write_text("--index-url https://pkgs.corp.example/simple\n")
+    (checkout / "pyproject.toml").write_text('[project]\nname = "other-copy"\n')
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert [(f.path, f.subject) for f in result.findings] == [
+        ("setup.cfg", "ghost-lib"),
+        ("setup.cfg", "other-copy"),
+    ]
+    assert result.notes == []
+    assert sorted(set(registry.queries)) == ["ghost-lib", "other-copy"]

@@ -79,9 +79,10 @@ def discover_all(paths: Sequence[Path], root: Path) -> tuple[list[Path], list[Pa
             # before descending. A sub-folder that holds a .git file or folder is a
             # worktree, clone or submodule: another copy of a project, not this one.
             # Its files must not count as this project's code (SLOP030 would
-            # double-report; SLOP001 would treat its modules as local, see #58). The
-            # path passed on the command line is the walk root and is never pruned, so
-            # an explicitly named checkout is still checked.
+            # double-report; SLOP001 would treat its modules as local and its
+            # dependency files as this project's, see #58). The path passed on the
+            # command line is the walk root and is never pruned, so an explicitly
+            # named checkout is still checked.
             dirnames[:] = [
                 d
                 for d in dirnames
