@@ -517,8 +517,11 @@ def test_only_slop001_reads_notebooks(write, check):
         json.dumps(notebook(["!pip install ghost"], metadata={"kernelspec": {"language": "R"}})),
         json.dumps(notebook(["!pip install ghost"], metadata={"language_info": {"name": "julia"}})),
         json.dumps(notebook(["!pip install ghost"])) + "trailing",
-        "[" * 100_000,
-        '{"nbformat": 4, "cells": [{"cell_type": "code", "source": ' + "[" * 100_000,
+        pytest.param("[" * 100_000, id="100,000 open brackets"),
+        pytest.param(
+            '{"nbformat": 4, "cells": [{"cell_type": "code", "source": ' + "[" * 100_000,
+            id="100,000 open brackets as a cell source",
+        ),
     ],
 )
 def test_files_that_are_not_python_notebooks(text, write, check):
@@ -541,6 +544,15 @@ def test_files_that_are_not_python_notebooks(text, write, check):
         "%pip install 'unterminated\n",
         "\x00!pip install nul\n",
         "import a\n\tb = 1\n  c = 2\n!pip install mixed-indent\n",
+    ],
+    ids=[
+        "5,000 nested brackets",
+        "20,000 unary operators",
+        "a sum of 100,000 numbers",
+        "a 5,000 character name",
+        "an open quote",
+        "a NUL",
+        "mixed indentation",
     ],
 )
 def test_cells_that_are_hard_to_read_never_stop_the_run(write, check, cell):

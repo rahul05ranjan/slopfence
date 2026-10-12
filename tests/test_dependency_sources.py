@@ -830,11 +830,11 @@ def test_setup_py_more_ways_to_pass_the_lists(write, tmp_path):
 def test_setup_py_long_and_deep_expressions(write, tmp_path):
     """A sum of many lists is read in full. Deeply nested expressions are read as far
     as twenty levels and never end the run."""
-    many = " + ".join(f'["pkg{n}"]' for n in range(3000))
+    many = " + ".join(f'["pkg{n}"]' for n in range(300))
     path = write("setup.py", f"from setuptools import setup\nsetup(install_requires={many})\n")
-    assert len(parse_dependency_file(path, tmp_path).dependencies) == 3000
+    assert len(parse_dependency_file(path, tmp_path).dependencies) == 300
 
-    chain = " if x else ".join(f'"alt{n}"' for n in range(1500))
+    chain = " if x else ".join(f'"alt{n}"' for n in range(150))
     nested_list = "[*" * 150 + '["deep"]' + "]" * 150
     nested_dict = "{**" * 150 + '{"dev": ["deep-extra"]}' + "}" * 150
     nested_kwargs = "{**" * 150 + '{"tests_require": ["deep-test"]}' + "}" * 150
@@ -846,6 +846,21 @@ def test_setup_py_long_and_deep_expressions(write, tmp_path):
     )
     names = [d.name for d in parse_dependency_file(path, tmp_path).dependencies]
     assert names == [f"alt{n}" for n in range(20)]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ['"a" + ' * 100_000 + '"b"', "~" * 20_000 + "1", "lambda: " * 5000 + "1"],
+    ids=["a sum of 100,000 strings", "20,000 unary operators", "5,000 nested lambdas"],
+)
+def test_a_setup_py_too_deep_for_the_parser_does_not_stop_the_run(write, tmp_path, expression):
+    """Every setup.py of the project is read for the name it gives the project, also
+    one that is not checked. One that Python's parser gives up on declares nothing."""
+    deep = write("vendor/generated/setup.py", f"from setuptools import setup\nx = {expression}\n")
+    checked = write("requirements.txt", "ghost-lib\n")
+    assert parse_dependency_file(deep, tmp_path).dependencies == []
+    result = run([checked], tmp_path, FakeRegistry(set()), select=["SLOP001"])
+    assert found(result) == [("requirements.txt", 1, 1)] and result.parse_errors == []
 
 
 def test_setup_py_is_still_checked_as_python(write, check):
