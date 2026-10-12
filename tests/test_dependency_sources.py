@@ -1180,6 +1180,14 @@ def test_an_index_in_a_requirements_file_that_is_not_utf8_still_counts(tmp_path,
     assert "secret" not in result.notes[0]
 
 
+def test_a_requirements_file_that_can_not_be_opened_names_no_index(tmp_path):
+    """A path that can't be opened at all (here: a folder) declares nothing and names
+    nothing. It does not end the run."""
+    (tmp_path / "requirements.txt").mkdir()
+    declared = parse_dependency_file(tmp_path / "requirements.txt", tmp_path)
+    assert declared.dependencies == [] and not declared.private_index
+
+
 def test_a_requirements_file_that_is_not_utf8_and_names_no_index_changes_nothing(tmp_path, check):
     """Without an index option, such a file says nothing about the other files."""
     (tmp_path / "requirements.txt").write_bytes(
