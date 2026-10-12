@@ -1404,6 +1404,12 @@ def test_detect_private_index_false_switches_inheritance_off(write, check):
     result = check("SLOP001", registry=registry, inherit_index=False)
     assert found(result) == [("setup.cfg", 3, 1)] and result.notes == []
     assert registry.queries == ["ghost-lib"]
+    # Imports are another matter: the switch does not bring their lookups back.
+    write("app.py", "import ghost_mod\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, inherit_index=False, check_imports=True)
+    assert found(result) == [("setup.cfg", 3, 1)] and registry.queries == ["ghost-lib"]
+    assert "didn't look up imports on PyPI: requirements.txt uses" in result.notes[0]
 
 
 def test_cli_passes_detect_private_index_on(tmp_path, monkeypatch, capsys):
