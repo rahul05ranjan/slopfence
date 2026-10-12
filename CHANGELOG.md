@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Starting on a project that already has findings is easier.** Record them once with `--write-baseline`, then fail only on new ones with `--baseline`. See "Baseline: start with the code you have" in the README ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51)).
 - `--list-rules` now reads `[tool.slopfence]`. With a config that is not valid it exits with code `2`, where v0.2 printed the rules ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52)).
 - JSON reports have a new `baselined` key. It is `0` when no baseline is used ([#51](https://github.com/syedmuhdahmad/slopfence/issues/51)).
+- **`SLOP001` reads more files:** `setup.cfg`, `setup.py`, `Pipfile` and more requirements file names. The package names declared there are now sent to pypi.org, like those in `requirements.txt`. They are not sent when a requirements file, `pyproject.toml`, `Pipfile` or `Pipfile.lock` of the project uses a private index. To leave a file out, add it to `exclude`, for example `exclude = ["setup.py"]` ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53)).
+- `Pipfile` entries are now checked. Before, the file was only read with `--check-imports` ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53)).
+- An index on `test.pypi.org` now counts as a private index: TestPyPI holds other packages than PyPI. An index is public when its host is `pypi.org`, `files.pythonhosted.org` or `pypi.python.org` ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53)).
 
 ### Added
 
@@ -23,8 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-file ignores:** `[tool.slopfence.per-file-ignores]` turns rules off in the files that match a pattern. A pattern works like an `exclude` pattern. Dependencies and imports in a file where `SLOP001` is off are not sent to PyPI ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 - **Severity overrides:** `[tool.slopfence.severity]` gives a rule another severity. Text, JSON and SARIF reports, `--fail-on` and `--list-rules` use it ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 
+- `SLOP001` also checks ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53)):
+  - `setup.cfg`: `install_requires`, `setup_requires`, `tests_require` and `[options.extras_require]`
+  - `setup.py`: the same keywords of `setup()`, when the list is written in the file or in a variable. The file is read with `ast` and never run
+  - `Pipfile`: `[packages]` and `[dev-packages]`
+  - More requirements file names: `dev-requirements.txt`, `requirements.in`, `constraints.txt`, and `.txt` / `.in` files inside a `requirements/` folder
+  - A file with one of these new names that is a plain list of names (no version, extra, marker or option anywhere) may be a list for apt or R. Nothing in it is reported when PyPI lacks more of its names than it has
+- A private index in a project file also covers the files that don't name one. When a requirements file, `pyproject.toml`, `Pipfile` or `Pipfile.lock` uses a private index, the dependencies in `setup.py`, `setup.cfg`, `Pipfile` and requirements files with another name than `requirements*.txt` are not looked up, and a note says so. An index in an excluded file doesn't count, and `detect-private-index = false` switches this off ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
+- A package that the project defines itself is never looked up. Its name comes from `[project] name` or `[tool.poetry] name` in any `pyproject.toml`, `[metadata] name` in any `setup.cfg`, and `setup(name=...)` in any `setup.py` of the project ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
+
 ### Changed
 
+- Requirements files are read more strictly. A line that pip would reject gives no finding, `python>=3.9` is not a package, and neither is a file name such as `vendor.tar.gz`. A document that is only named like a requirements file is skipped ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
+- Requirements files for other package managers (`apt-requirements.txt`, `requirements-conda.txt`) are no longer read ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
+- `--find-links` and `--no-index` in a requirements file make that file's packages private: a name that PyPI doesn't have may come from the links ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
+- With `--diff`, dependency files outside the diff are no longer looked up on PyPI. Their findings were already left out ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
 - **Much faster on big projects, with far less memory.** The CPython standard library and 127 installed packages (22,864 files) took 5 min 44 s and 8 GB of memory in v0.2.0. Now they take a little over 2 minutes with one process, and 35 to 45 seconds with 8 jobs on 4 cores. The main process needs about 0.3 GB, and each worker 40 to 80 MB ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 - Checking a few files of a big project (pre-commit) is faster. The rest of the project is only read for what `SLOP030` needs, and its test files are not read at all ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 - PyPI lookups are sent 8 at a time instead of one by one. 200 uncached names took more than 90 seconds and now take about 10. What is sent has not changed. A name is requested once per run, also when PyPI gives no answer for it ([#54](https://github.com/syedmuhdahmad/slopfence/issues/54))
@@ -37,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A checkout nested inside the project (a git worktree, clone or submodule, such as Claude Code's `.claude/worktrees/`) no longer counts as project code. Before, `SLOP030` reported every function as a duplicate of its copy, and `SLOP001` treated its modules as the project's own. A nested checkout that you name on the command line is still checked ([#58](https://github.com/syedmuhdahmad/slopfence/issues/58))
+- A `pyproject.toml` whose tables have another shape than the format asks for (`project = "demo"`) stopped the run with a traceback. It is now read as far as it goes ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
 - Findings at the same position (`import a, b` where neither exists) could be listed in a different order from run to run. They are now ordered by message ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))
 - `SLOP030`: checking a folder or a few files now reports the same duplicates in them as checking the whole project. Before, one copy could be missed when the first copy was outside the checked paths, or when folder names sort differently as folders and as text (`a/` and `a-b/`) ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 - A file that Python only warns about (an invalid escape sequence such as `"\d"`) counted as unparseable when warnings were turned into errors (`python -W error`). Such a file is now always parsed, and Python's warning about it is no longer printed ([#12](https://github.com/syedmuhdahmad/slopfence/issues/12))

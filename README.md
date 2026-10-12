@@ -96,7 +96,7 @@ baseline = ".slopfence-baseline.json"       # hide the findings recorded in this
 SLOP040 = "medium"
 ```
 
-`exclude` works like `.gitignore`: a pattern without a `/` in the middle matches any file or folder name anywhere (`migrations`, `*_pb2.py`), and a pattern with one is relative to the project root (`tests/fixtures/`). Excluded files are never checked, but imports of excluded modules still count as your own code.
+`exclude` works like `.gitignore`: a pattern without a `/` in the middle matches any file or folder name anywhere (`migrations`, `*_pb2.py`), and a pattern with one is relative to the project root (`tests/fixtures/`). Excluded files are never checked, but imports of excluded modules still count as your own code. So does a package that an excluded `setup.py`, `setup.cfg` or `pyproject.toml` defines.
 
 `per-file-ignores` turns rules off in the files that match a pattern. A pattern works exactly like an `exclude` pattern. Put it in quotes. If several patterns match a file, all their rules are skipped. Unlike `exclude`, every other rule still checks the file. Two details:
 
@@ -116,7 +116,7 @@ Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `
 x = legacy()  # slopfence: ignore
 ```
 
-Put `# slopfence: ignore-file` anywhere in a file to skip it. In `requirements.txt`, add `# slopfence: ignore` to a line.
+Put `# slopfence: ignore-file` anywhere in a file to skip it. In a requirements file, `pyproject.toml`, `setup.cfg` or `Pipfile`, add `# slopfence: ignore` to the end of the line.
 
 To skip a rule in whole files or folders, use [`per-file-ignores`](#configuration). To accept everything a project has today and only see new findings, use a [baseline](#baseline-start-with-the-code-you-have).
 
@@ -171,16 +171,36 @@ That is the file, the rule, what the finding is about, and how many there are. "
 - A baseline file that is missing or can't be read is an error (exit code `2`), not an empty baseline.
 - Files that can't be parsed are not findings, so they can't be baselined. Use `exclude` for those.
 
+### Where `SLOP001` finds dependencies
+
+| File | What is checked |
+|---|---|
+| Requirements files | Every requirement line. Options, URLs and paths are skipped |
+| `pyproject.toml` | `[project]` dependencies and optional dependencies, `[dependency-groups]`, Poetry tables |
+| `setup.cfg` | `install_requires`, `setup_requires`, `tests_require` and `[options.extras_require]` |
+| `setup.py` | The same keywords of `setup()`, when the list is written in the file, or in a variable that is assigned in the file. The file is read, never run. Anything computed is skipped |
+| `Pipfile` | `[packages]` and `[dev-packages]` |
+
+A requirements file is a `.txt` or `.in` file whose name starts or ends with `requirements` or `constraints`: `requirements-dev.txt`, `dev-requirements.txt`, `requirements.in`, `constraints.txt`. Any `.txt` or `.in` file inside a folder named `requirements` is one too: `requirements/base.txt`. A name that mentions another package manager is skipped (`apt-requirements.txt`, `requirements-conda.txt`), and so is `CMakeLists.txt`.
+
+Some names are read and never looked up:
+
+- **Your own packages.** The `name` in any `pyproject.toml`, `setup.cfg` or `setup.py` of the project is a package of this repository, so a dependency on it is not a hallucination.
+- **Lines that are not requirements.** `python>=3.9`, a file name (`vendor.tar.gz`), a path, a checksum. A file with more prose than requirements is skipped as a whole.
+- **Lists for another tool.** A file with one bare name per line, and no version, extra, marker or option anywhere, may list packages for apt or R. If its name is not `requirements*.txt`, and PyPI lacks more of its names than it has, nothing in it is reported.
+
+Known limit: a list for another tool whose names mostly exist on PyPI too (`git`, `docker`) is read as a pip file. Add such a file to `exclude`. The same goes for any file you don't want read: `exclude = ["setup.py"]`.
+
 ### What slopfence sends over the network
 
 slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001`. It sends a request per package name (`HEAD https://pypi.org/pypi/<name>/json`) and nothing else: no code, no file names, no telemetry. Up to 8 requests are sent at a time. That changes how fast the answers arrive, not what is sent.
 
 | Names sent to PyPI | When |
 |---|---|
-| Dependencies declared in `requirements*.txt` and `pyproject.toml` | By default. These names are already meant for a package index. Entries installed from URLs, paths or git are never sent. Neither is any dependency in a file that uses a private index: `--index-url` / `--extra-index-url` in a requirements file, a `[[tool.poetry.source]]` or `[[tool.uv.index]]` that isn't PyPI (unless it's `explicit`, which only affects the dependencies that name it), or a per-dependency Poetry `source` or `[tool.uv.sources]` entry |
+| Dependencies declared in requirements files, `pyproject.toml`, `setup.cfg`, `setup.py` and `Pipfile` (see [Where `SLOP001` finds dependencies](#where-slop001-finds-dependencies)) | By default. These names are already meant for a package index. Entries installed from URLs, paths or git are never sent. Neither is a package of your own project, or any dependency that may come from a private index (see [Private package indexes](#private-package-indexes)) |
 | Imports in your source code that aren't stdlib, installed, part of your project, or provided by a declared or locked package | **Only with `--check-imports`** (or `check-imports = true`). This can catch an invented package that was imported but never declared, but for private code it may reveal internal package names |
 
-Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`, or a dependency or import under an [ignore comment](#ignoring-a-finding) (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`). Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. `--offline` sends nothing at all.
+Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`, or a dependency or import under an [ignore comment](#ignoring-a-finding) (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`). Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. With `--diff`, only the dependency files in the diff are looked up. `--offline` sends nothing at all.
 
 ### Private package indexes
 
@@ -188,20 +208,30 @@ If your packages may come from an index other than PyPI, a name that PyPI doesn'
 
 | Where | What counts as private |
 |---|---|
-| `requirements*.txt` | `-i` / `--index-url` / `--extra-index-url` with a non-PyPI URL: that file's packages |
+| Requirements files | `-i` / `--index-url` / `--extra-index-url` with a non-PyPI URL, `-f` / `--find-links`, `--no-index`: that file's packages |
 | `pyproject.toml` | `[[tool.poetry.source]]` (except `explicit` ones), `[[tool.uv.index]]` (except `explicit` ones), `[tool.uv] index-url` / `extra-index-url` (also under `[tool.uv.pip]`), `[[tool.pdm.source]]`: that file's packages. A per-dependency Poetry `source` or `[tool.uv.sources]` entry: that package |
-| `Pipfile`, `Pipfile.lock` | A `[[source]]` that isn't PyPI |
+| `Pipfile`, `Pipfile.lock` | A `[[source]]` that isn't PyPI: that `Pipfile`'s packages. An entry with `git`, `path`, `file`, `url`, or an `index` that is not a PyPI source: that package |
+| `setup.cfg`, `setup.py` | `dependency_links`: that file's packages |
 | Environment variables | `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `UV_INDEX`, `UV_DEFAULT_INDEX`, `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL` |
 | pip configuration | `pip.conf` / `pip.ini` in pip's global, user and virtualenv locations, and `PIP_CONFIG_FILE` (`[global]` and `[install]` sections) |
 | uv configuration | `uv.toml` in the project, user and system config folders, or `UV_CONFIG_FILE` (`UV_NO_CONFIG` turns this off), including its `[pip]` table used by `uv pip install` |
 
-A private index in a project file stops lookups for that file's dependencies, and for imports with `--check-imports`. A private index in your **environment** (variables, pip or uv configuration) could serve any package, so `SLOP001` makes **no lookups at all** and the report says so in a note. An index is public only if its host is `pypi.org` or `pythonhosted.org`. slopfence never prints index URLs, because they can contain credentials.
+A private index in a project file stops lookups for that file's dependencies, and for imports with `--check-imports`.
+
+It also stops lookups for the dependency files that v0.2 did not read: `setup.py`, `setup.cfg`, `Pipfile`, and requirements files with any name but `requirements*.txt`. These files rarely name an index themselves, and they are often installed together with a file that does (`pip install -r requirements.txt -c constraints.txt`). So when a requirements file, `pyproject.toml`, `Pipfile` or `Pipfile.lock` anywhere in the project uses a private index, their dependencies are not looked up, and the report says so in a note. You can change that in two ways:
+
+- An index in an [excluded](#configuration) file doesn't count.
+- `detect-private-index = false` switches this off. A private index then only covers the file that names it.
+
+`--find-links`, `--no-index` and `dependency_links` name no index. They only ever cover their own file.
+
+A private index in your **environment** (variables, pip or uv configuration) could serve any package, so `SLOP001` makes **no lookups at all** and the report says so in a note. An index is public only if its host is `pypi.org`, `files.pythonhosted.org` or `pypi.python.org`. TestPyPI (`test.pypi.org`) is another index, so it counts as private. slopfence never prints index URLs, because they can contain credentials.
 
 If your company index only **mirrors** PyPI, set `detect-private-index = false` (or pass `--no-detect-private-index`) to check packages against PyPI again, and list your own private packages in `known-packages`.
 
 ### Imports with a different package name
 
-With `--check-imports`, an import isn't looked up when a declared dependency or a locked package provides it, even if the names differ and the package isn't installed where slopfence runs. For example, `import bs4` is covered by `beautifulsoup4`, `import dateutil` by `python-dateutil`, and `from google.cloud import storage` by `google-cloud-storage`. slopfence reads `uv.lock`, `poetry.lock`, `pdm.lock`, `Pipfile.lock` and `Pipfile`, so indirect dependencies count too (`import idna` when only `requests` is declared).
+With `--check-imports`, an import isn't looked up when a declared dependency or a locked package provides it, even if the names differ and the package isn't installed where slopfence runs. For example, `import bs4` is covered by `beautifulsoup4`, `import dateutil` by `python-dateutil`, and `from google.cloud import storage` by `google-cloud-storage`. slopfence reads `uv.lock`, `poetry.lock`, `pdm.lock` and `Pipfile.lock`, so indirect dependencies count too (`import idna` when only `requests` is declared).
 
 ### What the code-quality rules skip
 
