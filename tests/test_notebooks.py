@@ -445,6 +445,46 @@ def test_ignore_comments_in_notebooks(write, check):
     assert len(check("SLOP001", registry=FakeRegistry(set())).findings) == 1
 
 
+@pytest.mark.parametrize(
+    "cells",
+    [
+        ["%%bash\n# slopfence: ignore-file\npip install ghost\n", "import ghost_m\n"],
+        ["%%bash\n# slopfence: ignore-file\necho hi\n", "!pip install ghost\nimport ghost_m\n"],
+        ["# slopfence: ignore-file\n!pip install ghost\nfor x in:\n", "import ghost_m\n"],
+        ["!pip install ghost  # slopfence: ignore-file\n", "%pip install ghost-two\n"],
+        ["%%writefile notes.txt\n# slopfence: ignore-file\n", "!pip install ghost\n"],
+        ["%%capture\n# Slopfence: Ignore-File\n!pip install ghost\n"],
+    ],
+    ids=["shell cell", "another shell cell", "not Python", "after a command", "writefile", "case"],
+)
+def test_ignore_file_counts_in_every_code_cell(write, check, cells):
+    """``# slopfence: ignore-file`` skips the notebook wherever a code cell holds it:
+    in a shell cell, in a cell that is not Python, or at the end of a command line.
+    Nothing of the notebook is sent."""
+    write("demo.ipynb", jupyter(cells))
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry, check_imports=True).findings == []
+    assert registry.queries == []
+
+
+def test_an_ignore_comment_ends_a_command_that_goes_on_over_several_lines(write, check):
+    """The comment of a continued command is at the end of its last line. It covers
+    the whole command, and no other."""
+    write(
+        "demo.ipynb",
+        jupyter(
+            [
+                "!pip install ghost-a \\\n    ghost-b  # slopfence: ignore\n!pip install ghost-c\n",
+                "%%bash\npip install ghost-d \\\n  ghost-e # slopfence: ignore[SLOP001]\n",
+                "!pip install ghost-f \\\n    ghost-g\n# slopfence: ignore\nx = 1\n",
+            ]
+        ),
+    )
+    registry = FakeRegistry(set())
+    assert subjects(check("SLOP001", registry=registry)) == ["ghost-c", "ghost-f", "ghost-g"]
+    assert sorted(registry.queries) == ["ghost-c", "ghost-f", "ghost-g"]
+
+
 def test_notebook_imports_need_check_imports(write, check, not_installed):
     """Import names in cells are only sent with check_imports, and cells that aren't
     Python (magics, shell lines, broken code) are never a parse error."""

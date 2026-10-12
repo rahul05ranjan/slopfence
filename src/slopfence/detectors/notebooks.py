@@ -35,7 +35,7 @@ from slopfence.detectors.pip_commands import (
     pip_requirements,
     shell_commands,
 )
-from slopfence.source import SourceFile, parse, top_level_imports
+from slopfence.source import IGNORE_FILE_RE, SourceFile, parse, top_level_imports
 
 # A notebook larger than this is not read. The whole file has to be in memory to be
 # decoded, with its images and outputs. Notebooks that people write stay far below it.
@@ -271,7 +271,6 @@ class CellView:
     imports: list[tuple[str, int, int]] = field(default_factory=list)
     # The lines of the cell (1-based) with an ignore comment that covers SLOP001.
     ignored: set[int] = field(default_factory=set)
-    ignore_file: bool = False
 
 
 def _is_magic_line(stripped: str) -> bool:
@@ -326,7 +325,7 @@ def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list
 
 def view_cell(text: str, want_imports: bool) -> CellView:
     """Find the command lines of a cell and, if it parses as Python, its imports
-    and ignore comments. A cell that doesn't parse is not an error."""
+    and the ignore comments on its lines. A cell that doesn't parse is not an error."""
     view = CellView()
     lines = text.split("\n")
     magic = _CELL_MAGIC.match(lines[0])
@@ -357,7 +356,6 @@ def view_cell(text: str, want_imports: bool) -> CellView:
             for line in range(node.lineno, node.end_lineno or node.lineno)
         }
         view.commands = [(offset, n) for offset, n in commands if n not in in_strings]
-    view.ignore_file = src.ignore_file
     view.ignored = {c.line for c in src.comments if suppresses_slop001(c.text)}
     if want_imports:
         for name, lineno, byte_col in top_level_imports(src):
@@ -390,18 +388,21 @@ def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool, tu
 
     Yields what the command says, whether an ignore comment covers it, and the part
     of the cell's text its arguments take up. The comment may be at the end of the
-    line or on a comment-only line right above it: on Windows a shell line passes
-    ``# ...`` on to pip, so there the comment can't share the line.
+    command, which is the end of its last line when it goes on over several. Or it
+    is on a comment-only line right above the command: on Windows a shell line
+    passes ``# ...`` on to pip, so there the comment can't share the line.
     """
     lines = cell.text.split("\n")
     for offset, n in view.commands:
         if len(lines[n]) > MAX_COMMAND_LENGTH:
             continue
+        commands, end = shell_commands(cell.text, offset)
+        last_line = cell.text[cell.text.rfind("\n", 0, end) + 1 : end]
         above = lines[n - 1].strip() if n else ""
-        ignored = suppresses_slop001(requirements_comment(lines[n])) or (
+        ignored = suppresses_slop001(requirements_comment(last_line)) or (
             above.startswith("#") and suppresses_slop001(above)
         )
-        for words in shell_commands(cell.text, offset)[0]:
+        for words in commands:
             arguments = pip_install_arguments(words)
             install = pip_requirements(arguments) if arguments else None
             if install is not None:
@@ -425,18 +426,22 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
     names another source than PyPI, or when a cell sets an index in a way that
     can't be followed (``pip config``, an environment variable, a ``pip.conf``).
     Then no import is returned either.
+
+    ``# slopfence: ignore-file`` anywhere in a code cell covers the notebook. A cell
+    may be a shell script, or not Python at all, so the words count wherever they
+    are: there is no telling a comment from other text in every such cell.
     """
     found = DependencyFile(rel, Kind.NOTEBOOK)
     notebook = read_notebook(text)
     if notebook is None:
         return found
-    links = ignore_file = False
+    ignore_file = any(IGNORE_FILE_RE.search(cell.text) for cell in notebook.cells)
+    links = False
     for cell in notebook.cells:
         understood: list[tuple[int, int]] = []
-        # Without a pip line or an ignore comment, the cell needn't be parsed.
-        if want_imports or "pip" in cell.text or "slopfence" in cell.text:
+        # Without a pip line, the cell needn't be parsed.
+        if want_imports or "pip" in cell.text:
             view = view_cell(cell.text, want_imports)
-            ignore_file = ignore_file or view.ignore_file
             for install, ignored, span in _installs(cell, view):
                 understood.append(span)
                 found.private_index = found.private_index or install.private_index
