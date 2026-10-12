@@ -106,7 +106,8 @@ def test_other_kinds():
 def test_discovery(write, tmp_path):
     """setup.py is a Python file and a dependency file, and a ``requirements`` folder
     above the project doesn't count."""
-    root = tmp_path / "requirements" / "app"
+    # Resolved, as the paths that come back are: a temporary folder can be a link.
+    root = (tmp_path / "requirements" / "app").resolve()
     for rel in [
         "setup.py",
         "setup.cfg",
@@ -1391,7 +1392,8 @@ def test_a_dependency_file_outside_the_project_is_still_checked(write, tmp_path)
     shared = write("shared/constraints.txt", "ghost-pin==1.0\n")
     for paths in ([tmp_path / "app", shared], [own, shared]):
         result = run(paths, tmp_path / "app", FakeRegistry({"requests"}))
-        assert [(f.path, f.subject) for f in result.findings] == [(shared.as_posix(), "ghost-pin")]
+        outside = shared.resolve().as_posix()  # reported with its full path
+        assert [(f.path, f.subject) for f in result.findings] == [(outside, "ghost-pin")]
         assert result.files_checked == 2
 
 
