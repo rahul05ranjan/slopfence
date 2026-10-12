@@ -72,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- With `--check-imports`, an import whose name PyPI can't hold as a package name (`import café`, `import _private`) ended the run with a traceback, or was sent to PyPI and reported. Such a name is no longer sent, and it is no longer reported: PyPI can't be asked about it, and such a module is more often a compiled part of the project than an invented package ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
+- With `--check-imports`, an import whose name PyPI can't hold as a package name (`import café`, `import _private`) ended the run with a traceback, or was sent to PyPI and reported. Such a name is no longer sent, and it is no longer reported: PyPI is not asked about it, and only PyPI's own answer says that a package is missing ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
 - With `--check-imports`, an import of the project's own package was looked up, and reported, when the package has no Python source in the project (a Rust or C extension) and is not installed where slopfence runs. A name that a `pyproject.toml`, `setup.cfg` or `setup.py` of the project gives it is now enough ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
 - An ignore comment at the end of a requirement that goes on over several lines (a pin with `--hash` lines, as `pip-compile --generate-hashes` writes it) was not read, and pip allows a comment nowhere else in such a requirement. It now counts for the requirement ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
 - An answer to a lookup that is not HTTP at all ended the run with a traceback. It now counts as no answer ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
