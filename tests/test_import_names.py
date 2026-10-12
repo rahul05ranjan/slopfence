@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from slopfence.detectors.import_names import IMPORT_NAMES, provides
+from slopfence.detectors.import_names import (
+    IMPORT_NAMES,
+    STDLIB_ON_OTHER_PYTHONS,
+    is_stdlib,
+    provides,
+)
 from slopfence.detectors.packages import parse_lock_file
 from tests.conftest import FakeRegistry, rule_lines
 
@@ -90,6 +95,43 @@ def test_declared_but_not_installed_imports_are_not_flagged(write, check, not_in
     assert set(registry.queries) - declared - {"PyGithub"} == {"fastjsonvalidatorx"}
 
 
+# Standard library modules that some supported Python lacks: removed in 3.12 or 3.13,
+# removed before 3.10, or added in 3.11 or 3.14.
+OTHER_PYTHONS = [
+    "imp", "asyncore", "asynchat", "smtpd", "distutils", "lib2to3", "cgi", "cgitb",
+    "telnetlib", "pipes", "crypt", "formatter", "parser", "symbol", "macpath",
+    "tomllib", "compression", "annotationlib",
+]  # fmt: skip
+
+
+def test_the_standard_library_of_every_python_counts():
+    """``is_stdlib`` knows the modules of the running Python and those that another
+    Python 3 has or had. A package and an invented name are neither."""
+    assert all(is_stdlib(module) for module in OTHER_PYTHONS)
+    assert set(OTHER_PYTHONS) <= STDLIB_ON_OTHER_PYTHONS
+    assert all(is_stdlib(module) for module in ("json", "sys", "__future__", "os"))
+    assert not any(is_stdlib(module) for module in ("requests", "ghost_mod_zz", "Imp"))
+
+
+def test_a_module_of_another_pythons_standard_library_is_never_looked_up(
+    write, check, not_installed
+):
+    """``import imp`` on Python 3.14 and ``import tomllib`` on Python 3.10 are no
+    invented packages. A Python file and a notebook get the same report on whichever
+    Python slopfence runs: only the invented import is sent and reported."""
+    code = "".join(f"import {module}\n" for module in OTHER_PYTHONS) + "import ghost_mod_zz\n"
+    write("old.py", code)
+    cell = {"cell_type": "code", "source": code}
+    write("old.ipynb", json.dumps({"cells": [cell], "metadata": {}, "nbformat": 4}))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert [(f.path, f.subject) for f in result.findings] == [
+        ("old.ipynb", "ghost_mod_zz"),
+        ("old.py", "ghost_mod_zz"),
+    ]
+    assert set(registry.queries) == {"ghost-mod-zz", "ghost_mod_zz"}
+
+
 LOCKS = {
     "uv.lock": 'version = 1\n\n[[package]]\nname = "idna"\nversion = "3.7"\n',
     "poetry.lock": '[[package]]\nname = "charset-normalizer"\nversion = "3.3.2"\n',
@@ -119,6 +161,8 @@ def test_lock_files_vouch_for_indirect_imports(write, check, not_installed, lock
 
 
 def test_broken_lock_file_is_ignored(write, tmp_path):
-    """An unreadable lock file contributes nothing instead of crashing the run."""
+    """An unreadable lock file contributes no name instead of crashing the run. Of a
+    ``Pipfile.lock``, which records its indexes, nobody can then say whether it uses
+    a private one."""
     assert parse_lock_file(write("uv.lock", "[[package\n")) == (set(), False)
-    assert parse_lock_file(write("Pipfile.lock", "{not json")) == (set(), False)
+    assert parse_lock_file(write("Pipfile.lock", "{not json")) == (set(), None)

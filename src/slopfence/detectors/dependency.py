@@ -6,7 +6,9 @@
   ``DependencyFile`` is everything one file declares.
 * ``parse_requirement`` reads the package name out of a requirement string, and
   refuses everything that is not a requirement (URLs, paths, file names, prose).
+  ``leading_name`` gives the name such a string starts with.
 * ``is_pip_option`` knows pip's index and links options, also when they are cut short.
+* ``text_lines`` cuts a text into the lines that git and an editor count.
 
 Nothing here reads a file or asks the registry.
 """
@@ -69,19 +71,27 @@ NOT_REQUIREMENTS = frozenset({"CMakeLists.txt"})
 _WORDS = re.compile(r"[a-z]+")
 
 _OPERATOR = r"(?:===|==|~=|!=|<=|>=|<|>)"
+_NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+_EXTRA = rf"(?:{_NAME}|\$\{{[A-Z0-9_]+\}})"
 # A PEP 508 requirement: a name, optional extras, then nothing, a version specifier
 # (which may stand in brackets), a marker or a direct reference. Anything else is not
-# a requirement ("https://x/y.whl", "this is prose", "add_test(NAME x)", "2>&1"). A
-# version may start with "$" or "{": pip expands ${VAR}, and templates fill in
-# {{ version }}. No two parts next to each other can match the same white space: if
-# they could, a line with a long run of spaces would take hours to turn down.
+# a requirement ("https://x/y.whl", "this is prose", "add_test(NAME x)", "2>&1"). The
+# extras are names with commas between them, as pip reads them: "[security, socks]"
+# is a list of extras, and bindep's "[platform:dpkg]" is not. An extra may be an
+# environment variable, in the one form that pip expands before it reads the line:
+# "[${EXTRAS}]". A version may start with "$" or "{": pip expands ${VAR}, and
+# templates fill in {{ version }}. No two parts next to each other can match the same
+# white space: if they could, a line with a long run of spaces would take hours to
+# turn down.
 _REQUIREMENT = re.compile(
     rf"""^\s*
-    (?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)
-    (?:\s*(?P<extras>\[[^\]]*\]))?
+    (?P<name>{_NAME})
+    (?:\s*(?P<extras>\[\s*(?:{_EXTRA}\s*(?:,\s*{_EXTRA}\s*)*)?\]))?
     \s*(?P<rest>$|[;@].*$|(?:\(\s*)?{_OPERATOR}\s*[A-Za-z0-9*${{].*$)""",
     re.X | re.S,
 )
+# What a string starts with when it starts like a package name, as v0.2 read it.
+_LEADING_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 # pip treats "#" as a comment only at line start or after whitespace (URLs contain "#egg=").
 REQ_COMMENT = re.compile(r"(^|\s)#.*$")
 # The name a URL gives its package: "git+https://host/repo.git#egg=name".
@@ -152,6 +162,15 @@ class DependencyFile:
     imports: list[tuple[str, int, int]] = field(default_factory=list)
     # Notebooks only: the file is too large to be read (see ``notebooks.MAX_BYTES``).
     too_large: bool = False
+    # ``setup.py``, ``setup.cfg`` and ``Pipfile`` only: the file lies under a test folder
+    # of the project. The package it defines is a fixture, so its dependencies are not
+    # looked up. Its own name and its private index count like those of any other file.
+    fixture: bool = False
+    # ``pyproject.toml`` and ``Pipfile`` only: the file could not be read. The TOML
+    # reader turned it down (broken, or written in a newer TOML than it knows), it is
+    # not UTF-8, or it can't be opened. It may set a private index that can't be seen
+    # here.
+    unreadable: bool = False
 
     def make_private(self) -> None:
         """Record that the file's packages may come from another place than PyPI: none
@@ -272,7 +291,8 @@ class Requirement(NamedTuple):
     """What a requirement string says about the package it names."""
 
     name: str
-    # ``name @ https://...``: the package never comes from an index.
+    # The string says where the package comes from, so it never comes from an index:
+    # ``name @ ...`` in any form, or a URL anywhere in it.
     direct: bool
     # The string is the name and nothing else: no extra, version, marker or URL.
     bare: bool
@@ -297,7 +317,22 @@ def parse_requirement(spec: str) -> Requirement | None:
     ):
         return None
     rest = m.group("rest")
-    return Requirement(name, rest.startswith("@"), not (rest or m.group("extras")))
+    # A URL in another place ("name==1.0 @ https://...") is no direct reference for
+    # pip. Whoever wrote it meant that URL all the same.
+    direct = rest.startswith("@") or "://" in spec
+    return Requirement(name, direct, not (rest or m.group("extras")))
+
+
+def leading_name(text: str) -> str | None:
+    """The name that a string starts with, or None when it starts with none.
+
+    For a string that is no requirement (``corp-auth=1.0``, ``corp-auth ^1.0``). Such
+    a name is never looked up. It is declared all the same, as it was in v0.2: an
+    ignore comment on it still counts, and the import of that package is not looked
+    up either.
+    """
+    m = _LEADING_NAME.match(text)
+    return m.group(1) if m else None
 
 
 def is_package_name(text: str) -> bool:
@@ -335,6 +370,18 @@ def is_pip_option(word: str, short: str, long: Mapping[str, str]) -> bool:
         return word.startswith(short)
     name = word.partition("=")[0]
     return any(full.startswith(name) and name.startswith(start) for full, start in long.items())
+
+
+def text_lines(text: str) -> list[str]:
+    """The lines of a text, as git and an editor count them.
+
+    A line ends at a line feed and nowhere else. ``str.splitlines`` also ends one at
+    a form feed, U+0085 or U+2028, and every line after such a character then gets a
+    number one too high. A carriage return before the line feed belongs to the line
+    end. Every parser that reports a line number, or matches a comment to a line,
+    takes its lines from here.
+    """
+    return [line.removesuffix("\r") for line in text.split("\n")]
 
 
 def suppresses_slop001(comment: str) -> bool:

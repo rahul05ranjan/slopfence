@@ -28,7 +28,7 @@ import importlib.util
 import json
 import re
 import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -44,18 +44,20 @@ from slopfence.detectors.dependency import (
     is_package_name,
     is_pip_option,
     kind_of,
+    leading_name,
     lists_other_packages,
     parse_requirement,
     requirements_comment,
     suppresses_slop001,
+    text_lines,
 )
-from slopfence.detectors.import_names import IMPORT_NAMES, provides
+from slopfence.detectors.import_names import IMPORT_NAMES, is_stdlib, provides
 from slopfence.detectors.notebooks import MAX_BYTES, scan_notebook
 from slopfence.detectors.setuptools_files import parse_setup_cfg, parse_setup_py
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
-from slopfence.models import Finding
+from slopfence.models import Finding, plural
 from slopfence.registry import BatchRegistry, OfflineRegistry, Registry, normalize
-from slopfence.source import IGNORE_FILE_RE, load, read_source
+from slopfence.source import IGNORE_FILE_RE, is_test_path, load, read_source
 from slopfence.source import relative_path as _rel
 
 if sys.version_info >= (3, 11):
@@ -64,16 +66,26 @@ else:  # pragma: no cover
     import tomli as tomllib
 
 
-_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 # Per-requirement options that may follow a requirement on its line (--hash=...). A
 # match starts where a run of white space starts, so a long run is only walked once.
 _LINE_OPTIONS = re.compile(r"(?<!\s)\s+--[A-Za-z].*$")
 # How a line starts that is an option, a URL or a path, and so names no package.
 _NOT_A_NAME = ("-", "git+", "hg+", "svn+", "bzr+", "http:", "https:", "file:", ".", "/")
-_WORD_START = re.compile(r"[A-Za-z0-9]")
+# How the markup of a document starts: an underline ("-----", "=====", "~~~~~"), a
+# bullet ("- 4 GB RAM", "* 4 GB RAM", "+ 2 CPUs"), a directive (".. toctree::"), a
+# quote ("> note"), the row of a table ("| a | b |"), literal text ("``pip``").
+_MARKUP_STARTS = ("-", ".", "=", "~", "*", "+", ">", "|", "`")
+# Of the lines that start like that, the ones that pip reads a requirement or an
+# option from: an option ("-r", "--hash=..."), the folder itself (".", "..") with or
+# without extras, a marker or an option of its own (".[dev]", ". ; python_version >=
+# '3.9'", ". --config-settings x=y"), and a path, whose first word holds a separator
+# ("./local", ".wheels/a.whl", ".\\local", "~/wheels/a.whl").
+_OPTION_OR_PATH = re.compile(r"--?[A-Za-z]|\.{1,2}(?:$|\[|\s*;|\s+--?[A-Za-z])|[.~]\S*[/\\]")
 # The name starts and ends with something that is not white space, so the white space
 # around it belongs to one part of the pattern only (see ``dependency._REQUIREMENT``).
 _TABLE_HEADER = re.compile(r"^\s*\[\[?\s*([^\]\s](?:[^\]]*[^\]\s])?)\s*\]\]?\s*(#.*)?$")
+# What a table header may hold besides the names of its tables.
+_HEADER_NOISE = re.compile(r"""[\s"']""")
 
 # A Pipfile declares dependencies itself, so it is a dependency file, not a lock file.
 LOCK_FILES = {"uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock"}
@@ -86,9 +98,16 @@ PIPFILE_TABLES = ("packages", "dev-packages")
 _PIPFILE_INDEX_KEYS = MARKER_NAMES | {"version", "extras", "markers", "index", "editable"}
 # The two files that setuptools reads as one distribution.
 _SETUPTOOLS_KINDS = (Kind.SETUP_CFG, Kind.SETUP_PY)
+# The kinds of file that define a package or an application of their own. Under a test
+# folder such a file is a fixture (see ``DependencyFile.fixture``). A requirements file
+# there is a real install list, and v0.2 already checked a ``pyproject.toml`` there.
+_FIXTURE_KINDS = (Kind.SETUP_PY, Kind.SETUP_CFG, Kind.PIPFILE)
 # The kinds of file that say where an install gets its packages. A private index in
 # one of them also covers the files that can't say (see ``DependencyFile.inherits_index``).
 _INSTALL_KINDS = (Kind.REQUIREMENTS, Kind.PYPROJECT, Kind.PIPFILE)
+# The kinds of TOML file that can set a package index. One that can't be read may set
+# a private index that nobody sees (see ``DependencyFile.unreadable``).
+_INDEX_TOML_KINDS = (Kind.PYPROJECT, Kind.PIPFILE)
 # The byte order marks pip knows a requirements file by. The marks of UTF-32 come
 # first: the little-endian one starts with the mark of UTF-16.
 _BYTE_ORDER_MARKS = (
@@ -102,6 +121,8 @@ _BYTE_ORDER_MARKS = (
 # nothing for them, and that must never be read as "fixed". SLOP002 (#39) is named
 # before it exists, so that the two rules can never get two lists.
 PACKAGE_RULES = frozenset({"SLOP001", "SLOP002"})
+# How many file names a note lists before it only counts the rest.
+NOTE_FILE_LIMIT = 3
 
 
 @dataclass
@@ -110,12 +131,14 @@ class ProjectIndex:
 
     root: Path
     local_modules: set[str] = field(default_factory=set)
-    # Every dependency file that was read, in the order it was given.
+    # Every dependency file that was read, in the order of ``_by_project_path``.
     files: list[DependencyFile] = field(default_factory=list)
     # Distributions named in lock files (normalized), including indirect ones.
     locked: set[str] = field(default_factory=set)
     # Lock files that record a non-PyPI index.
     private_lock_files: list[str] = field(default_factory=list)
+    # Lock files that record their indexes and could not be read.
+    unreadable_lock_files: list[str] = field(default_factory=list)
 
     @property
     def declared(self) -> set[str]:
@@ -154,15 +177,23 @@ class ProjectIndex:
         return [file.rel for file in self.files if file.private_index] + self.private_lock_files
 
     @property
+    def unreadable_index_files(self) -> list[str]:
+        """The files that may set a private index nobody can see: a ``pyproject.toml``,
+        ``Pipfile`` or ``Pipfile.lock`` that could not be read."""
+        return [file.rel for file in self.files if file.unreadable] + self.unreadable_lock_files
+
+    @property
     def install_index_files(self) -> list[str]:
-        """The private index files that say where an install gets its packages.
+        """The files that say where an install gets its packages, and name a private
+        index there or may name one.
 
         These are requirements files, ``pyproject.toml``, ``Pipfile`` and
         ``Pipfile.lock``. A ``setup.py`` with ``dependency_links`` is not one: it only
-        speaks for itself.
+        speaks for itself. The files that could not be read come last (see
+        ``unreadable_index_files``).
         """
         named = [f.rel for f in self.files if f.private_index and f.kind in _INSTALL_KINDS]
-        return named + self.private_lock_files
+        return named + self.private_lock_files + self.unreadable_index_files
 
 
 def build_index(
@@ -175,8 +206,9 @@ def build_index(
     """Collect the project's own modules, its dependencies and its locked packages.
 
     Every dependency file is read once, and everything SLOP001 knows about it comes
-    from that one reading. With ``imports`` False only the dependency check is
-    prepared: the project's modules, the names in lock files and the imports in
+    from that one reading. The files may come in any order: they are put in one order
+    here (see ``_by_project_path``). With ``imports`` False only the dependency check
+    is prepared: the project's modules, the names in lock files and the imports in
     notebooks are left out, because only the import check asks for them.
     """
     index = ProjectIndex(root=root)
@@ -186,17 +218,45 @@ def build_index(
             if parent == root or root not in parent.parents:
                 break
             index.local_modules.add(parent.name)
-    for path in dep_files:
-        index.files.append(parse_dependency_file(path, root, imports))
+    for path in _by_project_path(dep_files, root):
+        file = parse_dependency_file(path, root, imports)
+        file.fixture = file.kind in _FIXTURE_KINDS and _in_test_folder(path, root)
+        index.files.append(file)
     _share_setuptools_sources(index.files)
-    for path in lock_files:
+    for path in _by_project_path(lock_files, root):
         if not imports and path.name not in INDEX_LOCK_FILES:
             continue  # a big lock file is only worth reading for its names
         names, private = parse_lock_file(path)
         index.locked |= {normalize(n) for n in names}
         if private:
             index.private_lock_files.append(_rel(path, root))
+        elif private is None:
+            index.unreadable_lock_files.append(_rel(path, root))
     return index
+
+
+def _by_project_path(paths: Iterable[Path], root: Path) -> list[Path]:
+    """``paths`` without doubles, ordered by their project-relative POSIX path.
+
+    The one place that orders the dependency and lock files of a run. A note lists
+    them in this order, and their names are looked up in it. It is the order of the
+    findings, and the same on every operating system: ``Path`` objects themselves
+    compare without case on Windows, and folder by folder everywhere.
+    """
+    return sorted(set(paths), key=lambda path: _rel(path, root))
+
+
+def _in_test_folder(path: Path, root: Path) -> bool:
+    """Whether a file lies under a test folder of the project (see ``source.is_test_path``).
+
+    Only the folders inside the project count. A file outside ``root`` that is named
+    on the command line is never in one, whatever the folders above it are called.
+    """
+    try:
+        inside = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return is_test_path(path.name, inside.as_posix())
 
 
 def _share_setuptools_sources(files: list[DependencyFile]) -> None:
@@ -213,15 +273,20 @@ def _share_setuptools_sources(files: list[DependencyFile]) -> None:
             file.make_private()
 
 
-def parse_lock_file(path: Path) -> tuple[set[str], bool]:
+def parse_lock_file(path: Path) -> tuple[set[str], bool | None]:
     """Distribution names in a lock file, and whether it uses a private index.
 
     Lock files list every installed package, including indirect dependencies a
     project may import directly (``import idna`` with only ``requests`` declared).
+
+    The second answer is None when nobody can say: the file records its indexes
+    (``INDEX_LOCK_FILES``), and it could not be read. Its reader turned it down, or
+    it is not UTF-8, or it can't be opened.
     """
+    unknown = None if path.name in INDEX_LOCK_FILES else False
     text = read_source(path)
     if text is None:
-        return set(), False
+        return set(), unknown
     try:
         if path.name == "Pipfile.lock":
             data = json.loads(text)
@@ -231,7 +296,7 @@ def parse_lock_file(path: Path) -> tuple[set[str], bool]:
         data = tomllib.loads(text)
     # RecursionError: arrays nested thousands deep, in a file nobody wrote by hand.
     except (ValueError, AttributeError, TypeError, RecursionError):
-        return set(), False
+        return set(), unknown
     # uv.lock, poetry.lock and pdm.lock all have [[package]] tables with a name.
     packages = _array(data.get("package"))
     names = {p["name"] for p in packages if isinstance(p, dict) and isinstance(p.get("name"), str)}
@@ -246,7 +311,7 @@ def toml_comments(text: str) -> list[str]:
     """
     comments: list[str] = []
     multiline: str | None = None
-    for line in text.split("\n"):
+    for line in text_lines(text):
         comment, i = "", 0
         while i < len(line):
             if multiline:
@@ -281,24 +346,27 @@ def _is_too_large(path: Path) -> bool:
         return False  # it can't be read at all, which the caller finds out next
 
 
-def _unread_requirements_name_an_index(path: Path) -> bool:
-    """Whether a requirements file that can't be read as UTF-8 names a private index.
+def _unread_requirements(path: Path, rel: str) -> DependencyFile:
+    """What a requirements file that can't be read as UTF-8 says about package sources.
 
     pip reads more than UTF-8: UTF-16 with a byte order mark (what ``>`` writes in
     Windows PowerShell), and the encoding of the user's locale. The packages of such
-    a file stay unread, as in v0.2. Its index options are plain ASCII in each of
-    these encodings, so they are found all the same, and the files that inherit from
-    this one keep their names on the machine.
+    a file are not looked up, as in v0.2. What the file says about where packages
+    come from is plain ASCII in each of these encodings, so it is read all the same:
+    its index options, and its entries with a source of their own
+    (``name @ git+...``, ``-e ...#egg=name``). The files that inherit from this one,
+    and the files that name such a package again, keep their names on the machine.
     """
     try:
         data = path.read_bytes()
     except OSError:
-        return False
+        return DependencyFile(rel, Kind.REQUIREMENTS)
     mark, encoding = next(
         (found for found in _BYTE_ORDER_MARKS if data.startswith(found[0])), (b"", "latin-1")
     )
-    text = data[len(mark) :].decode(encoding, "replace")
-    return _requirements_sources(text.splitlines())[0]
+    found = _parse_requirements(data[len(mark) :].decode(encoding, "replace"), rel)
+    found.dependencies = [dep for dep in found.dependencies if dep.own_source]
+    return found
 
 
 def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> DependencyFile:
@@ -311,21 +379,18 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     kind = kind_of(path, root) or Kind.REQUIREMENTS
     rel = _rel(path, root)
     if kind is Kind.SETUP_PY:
-        # A Python file: parsed like any other, never executed.
-        try:
-            src = load(path, root)
-        except (RecursionError, MemoryError):
-            # Nested more deeply than Python's parser takes. Every setup.py of the
-            # project is read here, also one that is excluded or not checked, so such
-            # a file must not end the run. It declares nothing that can be read.
-            src = None
+        # A Python file: parsed like any other, never executed. One that the parser
+        # gives up on declares nothing that can be read.
+        src = load(path, root)
         return parse_setup_py(src) if src is not None else DependencyFile(rel, kind)
     if kind is Kind.NOTEBOOK and _is_too_large(path):
         return DependencyFile(rel, kind, too_large=True)
     text = read_source(path)
     if text is None:
-        private = kind is Kind.REQUIREMENTS and _unread_requirements_name_an_index(path)
-        return DependencyFile(rel, kind, private_index=private)
+        if kind is Kind.REQUIREMENTS:
+            return _unread_requirements(path, rel)
+        # Not UTF-8, or it can't be opened: the TOML reader takes no such file either.
+        return DependencyFile(rel, kind, unreadable=kind in _INDEX_TOML_KINDS)
     if kind is Kind.NOTEBOOK:
         return scan_notebook(text, rel, imports)
     if kind is Kind.SETUP_CFG:
@@ -333,7 +398,7 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     # Directives only count inside real comments, never inside values or URLs.
     if kind is Kind.REQUIREMENTS:
         found = _parse_requirements(text, rel)
-        comments = [requirements_comment(line) for line in text.splitlines()]
+        comments = [requirements_comment(line) for line in text_lines(text)]
     else:
         found = _parse_pyproject(text, rel) if kind is Kind.PYPROJECT else _parse_pipfile(text, rel)
         comments = toml_comments(text)
@@ -343,20 +408,38 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     return found
 
 
-def _requirements_sources(lines: list[str]) -> tuple[bool, bool]:
+def _pip_lines(lines: list[str]) -> list[tuple[int, str]]:
+    """The lines of a requirements file as pip reads them, each with the number
+    (1-based) of the line of the file that it is on.
+
+    pip ends a line wherever ``str.splitlines`` ends one: also at a form feed, at
+    U+0085 and at U+2028. git and an editor do not (see ``text_lines``, which gives
+    ``lines``). So one line of the file can hold several lines for pip, and an index
+    option or a git entry after such a character is one of them.
+    """
+    return [(number, piece) for number, line in enumerate(lines, 1) for piece in line.splitlines()]
+
+
+def _requirements_sources(lines: Iterable[str]) -> tuple[bool, bool]:
     """Which package sources other than PyPI a requirements file names itself.
+
+    ``lines`` are the lines as pip reads them (see ``_pip_lines``).
 
     The first answer is a non-PyPI ``--index-url`` or ``--extra-index-url``. The
     second is ``--find-links`` or ``--no-index``: no index, but a name that PyPI
     doesn't have may come from there. pip reads options from a line that starts
-    with one, and such a line may hold several.
+    with one, and such a line may hold several. A requirement that goes on with one
+    (``corp-auth==1.0 --extra-index-url ...``) counts too: pip takes no index from
+    there, but whoever wrote the line meant one.
     """
     index = links = False
     for raw in lines:
         words = REQ_COMMENT.sub("", raw).split()
-        if not words or not words[0].startswith("-"):
+        first = next((n for n, word in enumerate(words) if word.startswith("-")), None)
+        if first is None or (first and parse_requirement(" ".join(words[:first])) is None):
             continue
-        for word, following in zip(words, [*words[1:], ""], strict=True):
+        options = words[first:]
+        for word, following in zip(options, [*options[1:], ""], strict=True):
             if is_pip_option(word, "-f", LINKS_OPTION_STARTS):
                 links = True
             elif is_pip_option(word, "-i", INDEX_OPTION_STARTS):
@@ -371,22 +454,39 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
 
     A line must be a valid requirement. A file with more prose lines than
     requirements is a document that is only named like a requirements file, and
-    yields nothing. Neither does a list for another package manager. The index
-    options of the file count in every case.
+    none of its names is looked up. So is a file with a line that only a document
+    has: an underline, a bullet, a directive (see ``_MARKUP_STARTS``). pip reads no
+    package from such a line: it turns the file down, or takes the line for an
+    option that says nothing. A line that goes on from the one before (it ended
+    with a backslash) is part of that line, whatever it starts with.
+
+    What a document says still counts. Its names are declared, and an entry with a
+    source of its own (``name @ git+...``) keeps that package from being looked up
+    in every other file. So a wrong guess about a file can only keep names on the
+    machine. A list for another package manager yields nothing. The index options
+    of the file count in every case.
     """
-    lines = text.splitlines()
+    lines = text_lines(text)
+    pip_lines = _pip_lines(lines)
     # With another source than PyPI, a name missing from PyPI may be a private package.
-    private_index, links = _requirements_sources(lines)
+    private_index, links = _requirements_sources(line for _, line in pip_lines)
     if lists_other_packages(PurePosixPath(rel)):
         return DependencyFile(rel, Kind.REQUIREMENTS, private_index=private_index)
     deps = []
     valid = prose = 0
     # Whether any line uses pip's own syntax: an option, a URL, a version, an extra.
-    pip_syntax = False
-    for lineno, raw in enumerate(lines, start=1):
-        suppressed = suppresses_slop001(requirements_comment(raw))
+    # Whether any line is the markup of a document. And whether the line before
+    # ended with a backslash: pip then reads the two as one.
+    pip_syntax = markup = continued = False
+    for lineno, raw in pip_lines:
+        # An ignore comment covers the line of the file that it is on, all of it.
+        suppressed = suppresses_slop001(requirements_comment(lines[lineno - 1]))
         line = REQ_COMMENT.sub("", raw).strip()
+        goes_on, continued = continued, line.endswith("\\")
         if not line:
+            continue
+        if not goes_on and line.startswith(_MARKUP_STARTS) and not _OPTION_OR_PATH.match(line):
+            markup = True
             continue
         if line.startswith(_NOT_A_NAME):
             pip_syntax = True
@@ -402,34 +502,48 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
         parsed = parse_requirement(spec)
         if parsed is None:
             # "This file lists..." is prose; "{% if x %}" is templating and neither.
-            prose += bool(_WORD_START.match(line))
+            # The name a line starts with is declared, though never looked up: v0.2
+            # took "corp-auth=1.0" for a requirement, and an ignore comment on it
+            # kept the import of that package on the machine too.
+            if name := leading_name(line):
+                prose += 1
+                deps.append(Dependency(name, rel, lineno, validate=False, suppressed=suppressed))
             continue
         valid += 1
         pip_syntax = pip_syntax or not parsed.bare or spec != line
+        # A URL in an option after the requirement counts like one in the requirement
+        # (see ``parse_requirement``): v0.2 kept the name of such a line on the machine.
+        sourced = parsed.direct or "://" in line
         deps.append(
             Dependency(
                 parsed.name,
                 rel,
                 lineno,
-                validate=not (parsed.direct or private_index or links),
+                validate=not (sourced or private_index or links),
                 suppressed=suppressed,
-                own_source=parsed.direct,
+                own_source=sourced,
             )
         )
-    found = DependencyFile(rel, Kind.REQUIREMENTS, private_index=private_index)
-    if prose <= valid:
-        found.dependencies = deps
+    found = DependencyFile(rel, Kind.REQUIREMENTS, deps, private_index=private_index)
+    if prose > valid or markup:
+        for dep in deps:
+            dep.validate = False
+    else:
         found.plain_list = valid > 0 and not pip_syntax
     return found
 
 
 def _table_ranges(lines: list[str]) -> dict[str, tuple[int, int]]:
-    """Map each TOML table header to its (first, last) 0-based line range."""
+    """Map each TOML table header to its (first, last) 0-based line range.
+
+    A header is known by its name without spaces and quotes:
+    ``[packages."ghost-lib"]`` is ``packages.ghost-lib``.
+    """
     headers = [(i, m.group(1)) for i, line in enumerate(lines) if (m := _TABLE_HEADER.match(line))]
     ranges = {}
     for n, (start, name) in enumerate(headers):
         end = headers[n + 1][0] - 1 if n + 1 < len(headers) else len(lines) - 1
-        ranges.setdefault(name.replace(" ", ""), (start, end))
+        ranges.setdefault(_HEADER_NOISE.sub("", name), (start, end))
     return ranges
 
 
@@ -438,12 +552,14 @@ class _LineFinder:
 
     def __init__(self, text: str) -> None:
         """``text`` is the whole pyproject.toml."""
-        self.lines = text.splitlines()
+        self.lines = text_lines(text)
         self.comments = toml_comments(text)
         self.ranges = _table_ranges(self.lines)
         # (line, column) of entries already matched, so repeated specs map to
         # successive occurrences and several entries can share one line.
         self.used: set[tuple[int, int]] = set()
+        # The same for the searches that ``key_in_v02`` makes.
+        self._used_by_v02: set[tuple[int, int]] = set()
 
     def _array_range(self, start: int, end: int, key: str) -> tuple[int, int] | None:
         """Lines spanned by `key = [ ... ]` inside a table, using quote-aware bracket counting."""
@@ -471,7 +587,21 @@ class _LineFinder:
             return i, end
         return None
 
-    def _search(self, table: str, pattern: re.Pattern[str], array: str | None = None) -> int:
+    def _search(
+        self,
+        table: str,
+        pattern: re.Pattern[str],
+        array: str | None = None,
+        used: set[tuple[int, int]] | None = None,
+    ) -> int:
+        """The line (1-based) of the first match of ``pattern`` in a table that no
+        earlier search took, or the first line of the table when there is none.
+
+        A table without a header of its own is searched for in the whole file.
+        ``array`` narrows the search to that array of the table. ``used`` holds the
+        matches that are taken: the finder's own, unless another set is given.
+        """
+        used = self.used if used is None else used
         start, end = self.ranges.get(table, (0, len(self.lines) - 1))
         if array is not None and (span := self._array_range(start, end, array)):
             start, end = span
@@ -480,8 +610,8 @@ class _LineFinder:
             if line.lstrip().startswith("#"):  # commented-out entries
                 continue
             for m in pattern.finditer(line):
-                if (i, m.start()) not in self.used:
-                    self.used.add((i, m.start()))
+                if (i, m.start()) not in used:
+                    used.add((i, m.start()))
                     return i + 1
         return start + 1
 
@@ -490,9 +620,27 @@ class _LineFinder:
         return self._search(table, quoted, array)
 
     def key(self, table: str, name: str) -> int:
-        return self._search(
-            table, re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
-        )
+        """The line (1-based) of the entry ``name`` of a table.
+
+        That is the line that starts with the key (``name = ...``, or
+        ``name.version = ...``). An entry that is a table of its own is on the line
+        of its header: ``[packages.name]``.
+        """
+        if own := self.ranges.get(f"{table}.{name}"):
+            return own[0] + 1
+        key = re.escape(name)
+        return self._search(table, re.compile(rf"""^\s*(?:"{key}"|'{key}'|{key})\s*[=.]"""))
+
+    def key_in_v02(self, table: str, name: str) -> int:
+        """The line (1-based) on which v0.2 reported the entry ``name`` of a table.
+
+        v0.2 only knew the form ``name = ...``. An entry in another form (a table of
+        its own, a dotted key) it reported on the header of ``table``, and without
+        such a header on the first ``name = ...`` line of the file, or on line 1.
+        That is where a user of v0.2 put the ignore comment for it.
+        """
+        pattern = re.compile(r"""^\s*["']?""" + re.escape(name) + r"""["']?\s*=""")
+        return self._search(table, pattern, used=self._used_by_v02)
 
     def suppressed(self, line: int) -> bool:
         """Whether an ignore comment on a line (1-based) covers SLOP001."""
@@ -531,6 +679,7 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
     found = DependencyFile(rel, Kind.PYPROJECT)
     data = _load_toml(text)
     if data is None:
+        found.unreadable = True
         return found
     finder = _LineFinder(text)
     deps = found.dependencies
@@ -541,15 +690,23 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
     private_index = found.private_index = uses_private_index(tool)
 
     def add_spec(table: str, array: str, spec: object) -> None:
-        """Record one PEP 508 requirement string from ``table.array``."""
-        if not isinstance(spec, str) or not (m := _REQ_NAME.match(spec)):
+        """Record one PEP 508 requirement string from ``table.array``.
+
+        A string that is no requirement is never looked up. The name it starts with
+        is declared all the same (see ``dependency.leading_name``), and a
+        ``[tool.uv.sources]`` entry for it still counts.
+        """
+        if not isinstance(spec, str):
             return
-        name = m.group(1)
-        if normalize(name) == project_name:  # self-references like "pkg[extra]"
+        parsed = parse_requirement(spec)
+        name = parsed.name if parsed else leading_name(spec)
+        # Not a self-reference like "pkg[extra]" either.
+        if name is None or normalize(name) == project_name:
             return
         line = finder.spec(table, array, spec)
-        sourced = "://" in spec or normalize(name) in uv_sources
-        validate = not (private_index or sourced)
+        direct = parsed.direct if parsed else "://" in spec
+        sourced = direct or normalize(name) in uv_sources
+        validate = parsed is not None and not (private_index or sourced)
         deps.append(
             Dependency(name, rel, line, validate, finder.suppressed(line), own_source=sourced)
         )
@@ -590,9 +747,12 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
             )
             line = finder.key(table, name)
             validate = not (external or private_index) and is_package_name(name)
-            deps.append(
-                Dependency(name, rel, line, validate, finder.suppressed(line), own_source=external)
+            # A comment on the line where v0.2 reported the entry kept its name on the
+            # machine. It still does, also where the entry is reported on another line.
+            suppressed = finder.suppressed(line) or finder.suppressed(
+                finder.key_in_v02(table, name)
             )
+            deps.append(Dependency(name, rel, line, validate, suppressed, own_source=external))
     return found
 
 
@@ -619,6 +779,7 @@ def _parse_pipfile(text: str, rel: str) -> DependencyFile:
     found = DependencyFile(rel, Kind.PIPFILE)
     data = _load_toml(text)
     if data is None:
+        found.unreadable = True
         return found
     finder = _LineFinder(text)
     private = found.private_index = pipfile_is_private(data)
@@ -666,6 +827,13 @@ def _is_installed(name: str, installed: set[str]) -> bool:
 _FileDependencies = tuple[DependencyFile, list[Dependency]]
 
 
+def _listed(files: Sequence[str]) -> str:
+    """File names for a note: the first few, then how many more there are."""
+    shown = ", ".join(files[:NOTE_FILE_LIMIT])
+    more = len(files) - NOTE_FILE_LIMIT
+    return f"{shown} and {plural(more, 'more file')}" if more > 0 else shown
+
+
 class PackageChecker:
     """Looks up dependencies and imports on PyPI and reports the ones that don't exist."""
 
@@ -681,7 +849,8 @@ class PackageChecker:
 
         ``inherited_from`` are the project files whose private index also covers the
         dependency files that name no index themselves (see
-        ``DependencyFile.inherits_index``). Empty when that is switched off.
+        ``DependencyFile.inherits_index``). A file that could not be read is among
+        them: it may set one. Empty when that is switched off.
         """
         self.index = index
         self.registry = registry
@@ -713,8 +882,15 @@ class PackageChecker:
         return bool(self.private_index) or isinstance(self.registry, OfflineRegistry)
 
     def _files(self, only_paths: set[str] | None) -> Iterator[DependencyFile]:
-        """The dependency files that are checked: all of them, or the ones in ``only_paths``."""
-        return (f for f in self.index.files if only_paths is None or f.rel in only_paths)
+        """The dependency files that are checked: all of them, or the ones in ``only_paths``.
+
+        Never a fixture package under a test folder (see ``DependencyFile.fixture``).
+        """
+        return (
+            file
+            for file in self.index.files
+            if not file.fixture and (only_paths is None or file.rel in only_paths)
+        )
 
     def _may_be_public(self, dep: Dependency) -> bool:
         """Whether a declared dependency, by itself, is one PyPI can be asked about.
@@ -764,6 +940,67 @@ class PackageChecker:
             for file in self._files(only_paths)
             if self._inherits(file) and any(self._may_be_public(dep) for dep in file.dependencies)
         ]
+
+    def imports_in_files(self, only_paths: set[str]) -> dict[str, list[tuple[str, int, int]]]:
+        """The imports that the checked dependency files hold themselves, by file.
+
+        Each is a (module, line, column), as ``check_imports`` takes them. Only a
+        notebook has any: the imports of a ``setup.py`` are collected with those of
+        every other Python file. Ignore comments were applied when the cells were
+        read. Empty unless the index was built with imports.
+        """
+        return {file.rel: file.imports for file in self._files(only_paths) if file.imports}
+
+    def notes(self, only_paths: set[str], check_imports: bool) -> list[str]:
+        """What the user should know about the lookups of this run, one note each.
+
+        ``only_paths`` is what ``check_dependencies`` got. A note says why nothing was
+        looked up, why imports or the dependencies of some files were not, and which
+        notebooks were too large to read.
+        """
+        notes = []
+        if self.private_index:
+            notes.append(
+                f"SLOP001 made no PyPI lookups: a private package index is configured in "
+                f"{self.private_index}, so packages missing from PyPI may be private. If that "
+                "index only mirrors PyPI, set detect-private-index = false."
+            )
+        elif check_imports and self.imports_may_be_private:
+            notes.append(
+                "SLOP001 didn't look up imports on PyPI: "
+                f"{_listed(self.index.private_index_files)} uses a private package index, so "
+                "unknown imports may be private packages."
+            )
+        if skipped := self.inherited_files(only_paths):
+            notes.append(
+                f"SLOP001 didn't look up the dependencies in {_listed(sorted(skipped))}: "
+                f"{self._why_inherited()}"
+            )
+        if too_large := sorted(file.rel for file in self._files(only_paths) if file.too_large):
+            notes.append(
+                f"SLOP001 didn't read {_listed(too_large)}: a notebook larger than "
+                f"{MAX_BYTES // 2**20} MB is skipped."
+            )
+        return notes
+
+    def _why_inherited(self) -> str:
+        """The second half of the note about dependency files that were held back.
+
+        It names the files that set a private index. When there is none, the files
+        were held back for one that could not be read: it may set an index.
+        """
+        unreadable = set(self.index.unreadable_index_files)
+        if named := [rel for rel in self.inherited_from if rel not in unreadable]:
+            return (
+                f"a private package index is set in {_listed(named)}, so names missing "
+                "from PyPI may be private packages. If that index only mirrors PyPI, set "
+                "detect-private-index = false."
+            )
+        return (
+            f"{_listed(self.inherited_from)} could not be read and may set a private package "
+            "index, so names missing from PyPI may be private packages. Repair or exclude "
+            "that file, or set detect-private-index = false."
+        )
 
     def _lookup_names(self, name: str) -> list[str]:
         """The names to ask PyPI about for ``import name``: none if it needs no lookup.
@@ -862,9 +1099,7 @@ class PackageChecker:
         package, Python, the project's own code, or a declared or locked package."""
         return (
             self._is_known(name)
-            or name in sys.stdlib_module_names
-            or name == "__future__"
-            or name in sys.builtin_module_names
+            or is_stdlib(name)
             or name in self.index.local_modules
             or name in IMPORT_NAMES
             or any(provides(dist, name) for dist in self._provided_by)

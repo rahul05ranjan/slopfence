@@ -96,6 +96,9 @@ def shell_commands(text: str, i: int) -> tuple[list[list[Word]], int]:
     after a redirection (``>``, ``<``) is dropped from its command. A backslash in
     front of another character stays in the word: such a word is a Windows path or
     something escaped, never a package name. An unterminated quote gives no commands.
+
+    A line may end with a carriage return and a line feed: the source strings of a
+    notebook keep the line ends they were saved with.
     """
     commands: list[list[Word]] = [[]]
     chars: list[str] | None = None
@@ -132,6 +135,8 @@ def shell_commands(text: str, i: int) -> tuple[list[list[Word]], int]:
                 chars, start = [], i
             if ch == "\\":
                 i += 1
+                if text.startswith("\r\n", i):
+                    i += 1  # a Windows line end: the backslash continues the line too
                 if i < n and text[i] != "\n":
                     chars.append("\\" + text[i])
                 elif not chars:
@@ -209,23 +214,26 @@ def _short_options(cluster: str) -> tuple[str, str | None] | None:
 def _package(word: Word) -> tuple[str, Word, bool] | None:
     """The package a word of a ``pip install`` command names, or None if it names none.
 
-    A URL names one when it says so (``name @ https://...``, ``#egg=name``): that
-    package is declared, but it doesn't come from an index. Paths, archives and
-    anything else that is not a requirement name nothing.
+    A word names one when it says where the package comes from: a direct reference
+    (``name @ https://...``, ``name @ file:../name``) or a URL with ``#egg=name``.
+    That package is declared, but it doesn't come from an index. Paths, archives
+    and anything else that is not a requirement name nothing.
     """
     text = word.text
+    parsed = parse_requirement(text)
+    if parsed and parsed.direct:
+        return parsed.name, word, True  # "name @ ..." in one word: a URL, or a path
     if "://" in text or text.startswith(("git+", "hg+", "svn+", "bzr+")):
-        parsed = parse_requirement(text)  # "name @ https://..." in one quoted word
-        name = parsed.name if parsed else egg_name(text)
+        name = egg_name(text)
         return (name, word, True) if name else None
     if "/" in text or text.startswith((".", "~")):
         return None  # a local path
-    parsed = parse_requirement(text)
-    return (parsed.name, word, parsed.direct) if parsed else None
+    return (parsed.name, word, False) if parsed else None
 
 
 def _unread(arguments: list[Word]) -> PipInstall:
-    """What is known of a command that has an option this module doesn't know.
+    """What is known of a command that has an option this module doesn't know, or
+    that runs pip in a form this module doesn't read.
 
     None of its packages: the value of the unknown option could be taken for one.
     An index or links option among its words still says that packages may come
@@ -235,11 +243,14 @@ def _unread(arguments: list[Word]) -> PipInstall:
     module's tables, so it arrives here. It counts as the option it is short for. A
     command line has more options than a requirements file, so pip refuses a few of
     these short forms as ambiguous (``--ex``): counting them too only keeps more
-    names on the machine.
+    names on the machine. A cluster of short options counts for the option in it
+    that takes a value: ``-qi`` is ``-q -i``.
     """
     found = PipInstall(unnamed=True)
     for word in arguments:
         option = word.text.partition("=")[0]
+        if option.startswith("-") and not option.startswith("--"):
+            option = (_short_options(option) or ("", None))[0]
         index = option in INDEX_OPTIONS or is_pip_option(word.text, "-i", INDEX_OPTION_STARTS)
         links = option in LINK_OPTIONS or is_pip_option(word.text, "-f", LINKS_OPTION_STARTS)
         found.private_index = found.private_index or index
@@ -247,6 +258,23 @@ def _unread(arguments: list[Word]) -> PipInstall:
         if index or links:
             found.source_options.append((word.start, word.end))
     return found
+
+
+def unread_pip_install(words: list[Word]) -> PipInstall | None:
+    """What is known of a command that runs ``pip install`` in a form that
+    ``pip_install_arguments`` does not take, or None when the command is none.
+
+    That is a command with a pip word (``pip``, ``/usr/bin/pip3``) and the word
+    ``install`` somewhere after it: ``pip -q install x``, ``sudo pip install x``,
+    ``env X=1 python -m pip --quiet install x``. Where its packages start can't be
+    told with certainty, so it names none (see ``_unread``). Its index and links
+    options count, from the pip word on: an option of ``sudo`` is none of pip's.
+    """
+    names = [word.text.replace("\\", "/").rpartition("/")[2] for word in words]
+    at = next((n for n, name in enumerate(names) if _PIP.match(name)), None)
+    if at is None or "install" not in names[at + 1 :]:
+        return None
+    return _unread(words[at + 1 :])
 
 
 def pip_requirements(arguments: list[Word]) -> PipInstall:

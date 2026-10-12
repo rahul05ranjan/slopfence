@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +13,15 @@ from slopfence import indexes
 from slopfence.detectors import packages
 from slopfence.engine import Result, run
 from slopfence.registry import OfflineRegistry
+
+# For a test case with an expression that is 100,000 operands long. Before Python 3.11
+# ``ast.parse`` has no depth limit: it takes such a sum with about 8 MB of stack, and
+# with less (``python.exe`` on Windows has 2 MB) the interpreter dies, and the whole
+# test run with it. From 3.11 on the parser gives up with an error, which is the case
+# the test is about.
+needs_parser_depth_limit = pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="ast.parse has no depth limit before Python 3.11"
+)
 
 
 class FakeRegistry:
@@ -83,10 +93,18 @@ def not_installed(monkeypatch):
 
 @pytest.fixture
 def write(tmp_path: Path) -> Callable[[str, str], Path]:
+    """A function that writes one file of the project under test, as UTF-8.
+
+    Without a named encoding a file would be written in the encoding of the locale,
+    which on Windows is not UTF-8: slopfence could not read a file that holds a
+    letter outside ASCII.
+    """
+
     def _write(rel: str, content: str) -> Path:
+        """Write ``content`` (dedented) to ``rel`` inside the project and return its path."""
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(textwrap.dedent(content).lstrip("\n"))
+        path.write_text(textwrap.dedent(content).lstrip("\n"), encoding="utf-8")
         return path
 
     return _write

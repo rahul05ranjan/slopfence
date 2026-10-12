@@ -8,11 +8,12 @@ import pytest
 from slopfence import diff as diffmod
 from slopfence.cli import main
 from slopfence.detectors import notebooks, packages
+from slopfence.detectors.dependency import Kind
 from slopfence.detectors.notebooks import read_notebook, scan_notebook
 from slopfence.detectors.pip_commands import pip_install_arguments, pip_requirements, shell_commands
 from slopfence.engine import discover_all, run
 from slopfence.registry import OfflineRegistry, PyPIRegistry
-from tests.conftest import FakeRegistry, git, git_init
+from tests.conftest import FakeRegistry, git, git_init, needs_parser_depth_limit
 
 PRIVATE = "https://user:secret@pkgs.corp.example/simple"
 
@@ -103,6 +104,7 @@ def pip(line):
         ("pip install -rrequirements.txt foo", ["foo"]),
         ("pip install --target ./lib --no-deps foo", ["foo"]),
         ("pip install foo \\\n    bar", ["foo", "bar"]),
+        ("pip install foo \\\r\n    bar", ["foo", "bar"]),  # a Windows line end
         ("pip install foo\\\nbar", ["foobar"]),  # the shell joins the two lines
         ("pip install discord.py ruamel.yaml", ["discord.py", "ruamel.yaml"]),
         ("pip install -r requirements.txt -c constraints.txt -e . ./local /abs/x.whl", []),
@@ -125,6 +127,11 @@ def test_pip_install_lines(line, names):
         # A URL that names its package: declared, never looked up.
         ("pip install git+https://x.example/r.git@v1#egg=repo", ([], ["repo"], False, False)),
         ("pip install 'corp @ https://example.com/corp.whl'", ([], ["corp"], False, False)),
+        # A direct reference to a path names its package in the same way.
+        (
+            "pip install 'corp @ file:../corp' core@file:../core \"auth[sso] @ ./vendor/auth\"",
+            ([], ["corp", "core", "auth"], False, False),
+        ),
         # An index that is not PyPI.
         ("pip install --index-url https://corp.example/simple corp", (["corp"], [], True, False)),
         ("pip install --extra-index-url=https://c.example/w torch", (["torch"], [], True, False)),
@@ -161,6 +168,12 @@ def test_pip_install_lines(line, names):
         ("pip install --new-flag --index-url=https://pypi.org/simple x", ([], [], True, False)),
         ("pip install --new-flag --find-links=./wheels x", ([], [], False, True)),
         ("pip install -x -f ./wheels x", ([], [], False, True)),
+        # In a cluster of short options too: "-qi" is "-q -i".
+        ("pip install --new-flag -qi https://corp.example/simple corp", ([], [], True, False)),
+        ("pip install --new-flag -qUf ./wheels x", ([], [], False, True)),
+        # Not an index: a value that only holds the letter, and a cluster that is not known.
+        ("pip install --new-flag -rindex.txt -t lib/fi x", ([], [], False, False)),
+        ("pip install --new-flag -xi corp", ([], [], False, False)),
         ("pip install 'unterminated", "not pip"),
         ("pip download foo", "not pip"),
         ("pip --quiet install foo", "not pip"),
@@ -180,6 +193,7 @@ def test_pip_install_lines_special_cases(line, expected):
         ("pip install requests 'flask[async]==2.*'", False),
         ("pip install -q -U --no-deps requests -c constraints.txt", False),
         ("pip install git+https://x.example/r.git#egg=repo", False),
+        ("pip install 'corp @ file:../corp'", False),
         ("pip install -i https://corp.example/simple corp", False),
         # A URL or a path that does not say what it installs.
         ("pip install git+https://github.com/x/detectron_zz.git", True),
@@ -234,7 +248,7 @@ CELLS = [
     "pip install automagic-pkg\n",
     "this is not python (\n!pip install still-found\n",
     "%%capture\n!python -m pip install ghost-five\n%pip install ghost-six\n",
-    "!conda install conda-pkg\n!apt-get install -y apt-pkg\n%pip download dl-pkg\n",
+    "!npm install npm-pkg\n!apt-get install -y apt-pkg\n%pip download dl-pkg\n",
     "%load_ext autoreload\nhelp_text = '''\npip install in-a-string-too\n'''\n",
 ]
 NAMES = [
@@ -242,6 +256,11 @@ NAMES = [
     "ghost-four", "automagic-pkg", "still-found", "ghost-five", "ghost-six",
 ]  # fmt: skip
 IMPORTS = ["requests", "os", "sys", "ghost_import", "numpy"]
+
+
+def crlf(cells):
+    """The cells with Windows line ends inside their source strings."""
+    return [cell.replace("\n", "\r\n") for cell in cells]
 
 
 def layouts():
@@ -262,6 +281,10 @@ def layouts():
         "source before outputs": json.dumps(reordered, indent=1),
         "source as one string": json.dumps(as_string, indent=1, ensure_ascii=False),
         "source as one string, minified": json.dumps(as_string, separators=(",", ":")),
+        "jupyter, Windows line ends in the sources": jupyter(crlf(CELLS)),
+        "minified, Windows line ends in the sources": json.dumps(
+            notebook(crlf(CELLS)), separators=(",", ":")
+        ),
     }
 
 
@@ -333,12 +356,28 @@ def test_checkpoint_folders_are_never_walked(write, tmp_path):
         f"!pip install --brand-new-flag -i {PRIVATE} corp-a\n",
         f"!uv pip install --brand-new-flag --index {PRIVATE} corp-a\n",
         "!pip install --brand-new-flag -f ./wheels corp-a\n",
+        # ... also in a cluster of short options.
+        f"!pip install --brand-new-flag -qi {PRIVATE} corp-a\n",
+        "!pip install --brand-new-flag -qf ./wheels corp-a\n",
         # A long option cut short, as pip allows.
         f"!pip install --extra-index {PRIVATE} corp-a\n",
         f"!pip install --extra-index={PRIVATE} corp-a\n",
         f"!pip install --pre --ind {PRIVATE} corp-a\n",
         "!pip install --find ./wheels corp-a\n",
         "!pip install --no-ind corp-a\n",
+        # pip in a form that is not read: no package of the command is named, and
+        # what it says about an index or links still counts.
+        f"!pip -q install -i {PRIVATE} corp-a\n",
+        f"%pip -q install --index {PRIVATE} corp-a\n",
+        f"!pip --no-cache-dir install --default-index {PRIVATE} corp-a\n",
+        "!pip -q install -f ./wheels corp-a\n",
+        "!pip --quiet install --no-index corp-a\n",
+        f"!sudo pip install -i {PRIVATE} corp-a\n",
+        f"!sudo -H pip3 install -qi {PRIVATE} corp-a\n",
+        f"!python -m pip -q install --index {PRIVATE} corp-a\n",
+        f"!env X=1 pip install -i {PRIVATE} corp-a\n",
+        f"!X=1 /usr/bin/pip install -i {PRIVATE} corp-a\n",
+        f"!time C:\\\\Python\\\\Scripts\\\\pip install -i {PRIVATE} corp-a\n",
     ],
 )
 def test_a_private_source_covers_the_whole_notebook(write, check, cell):
@@ -348,6 +387,48 @@ def test_a_private_source_covers_the_whole_notebook(write, check, cell):
     registry = FakeRegistry(set())
     result = check("SLOP001", registry=registry, check_imports=True)
     assert result.findings == [] and registry.queries == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "!sudo pip install ./pkg",
+        "!pip -q install ./pkg",
+        "!python -m pip -q install -e .",
+        "!sudo pip install -r requirements.txt",
+        "!sudo -H pip install corp-auth",
+    ],
+)
+def test_a_pip_install_that_is_not_read_names_nothing(write, check, not_installed, command):
+    """``sudo pip install x`` and ``pip -q install x`` install something, and no name
+    is read from them. So the notebook's imports are not looked up, as after a pip
+    line that installs a path. Its other pip lines still are."""
+    cells = [command + "\n", "%pip install ghost-lib\nimport corp_auth, somepkg_zz\n"]
+    write("nb.ipynb", jupyter(cells))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost-lib"] and registry.queries == ["ghost-lib"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "!sudo pip freeze",
+        "!pip --version",
+        "!sudo -i true",
+        f"!sudo -i {PRIVATE} apt-get install -y libpq-dev",
+        "!pipenv --version",
+        "!echo install pip",
+        "!pip download ghost-lib",
+    ],
+)
+def test_a_command_that_is_no_pip_install_changes_nothing(write, check, not_installed, command):
+    """The look-alike cases: pip without ``install``, ``install`` without pip, and an
+    option of another program. The notebook's package and import are looked up."""
+    write("nb.ipynb", jupyter([command + "\n", "%pip install ghost-lib\nimport ghost_mod_zz\n"]))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost-lib", "ghost_mod_zz"]
 
 
 @pytest.mark.parametrize(
@@ -620,13 +701,28 @@ def test_notebook_imports_need_check_imports(write, check, not_installed):
         ["%%writefile my_train_utils.py\ndef f():\n    return 1\n", "import my_train_utils\n"],
         ["from helpers.plots import draw\n", "%%writefile -a helpers/plots.py\ndraw = print\n"],
         ["%%file tools.py\nx = 1\n", "import tools\n"],
+        ["%%writefile helpers\\plots.py\ndraw = print\n", "from helpers.plots import draw\n"],
+        ["%%writefile .\\my_train_utils.py\nx = 1\n", "import my_train_utils\n"],
+        ["%%writefile -a C:\\work\\my_utils.py\nx = 1\n", "import my_utils\n"],
         ["!pip install git+https://github.com/x/detectron_zz.git\n", "import detectron_zz\n"],
         ["!pip install --some-new-flag pkg_zz\n", "import pkg_zz\n"],
         ["%pip install -r requirements.txt\n", "import from_the_file\n"],
         ["%pip install -q -e .\n", "import this_project\n"],
         ["%%bash\npip install $EXTRA\n", "import whatever_extra_is\n"],
     ],
-    ids=["writefile", "writefile in a folder", "file", "URL", "option", "-r", "-e", "variable"],
+    ids=[
+        "writefile",
+        "writefile in a folder",
+        "file",
+        "writefile with backslashes",
+        "writefile into this folder, with a backslash",
+        "writefile with a drive",
+        "URL",
+        "option",
+        "-r",
+        "-e",
+        "variable",
+    ],
 )
 def test_imports_a_notebook_provides_itself_are_not_looked_up(write, check, not_installed, cells):
     """A module that a cell writes belongs to the notebook. And when a pip line
@@ -636,6 +732,108 @@ def test_imports_a_notebook_provides_itself_are_not_looked_up(write, check, not_
     registry = FakeRegistry(set())
     result = check("SLOP001", registry=registry, check_imports=True)
     assert result.findings == [] and registry.queries == []
+
+
+# Cells after which an import may be code that the notebook fetched, or a package
+# that it installed with another tool than pip.
+BRINGS_CODE = [
+    "!git clone https://github.com/someone/helpers_zz.git",
+    "%%bash\ngit clone https://github.com/someone/helpers_zz.git",
+    "!wget -q https://x.example/helpers_zz.py",
+    "!curl -sO https://x.example/helpers_zz.py",
+    "!unzip -q code.zip",
+    "!gdown --id 1AbC -O helpers_zz.py",
+    "!cp -r ../input/my-scripts/* .",
+    "!cp -Rf /kaggle/input/scripts .",
+    "%cd helpers_repo",
+    "import os\nos.chdir('/content/drive/MyDrive/project')",
+    "import sys\nsys.path.append('/content/drive/MyDrive/project')",
+    "%env PYTHONPATH=/content/repo",
+    "import os\nos.environ['PYTHONPATH'] = '/content/repo'",
+    "%conda install -c conda-forge helpers_zz",
+    "!conda install -y helpers_zz",
+    "!mamba install helpers_zz",
+    "!uv add helpers_zz",
+    "!poetry add helpers_zz",
+    "!pipenv install helpers_zz",
+    # A ``cd`` line without the ``%`` is the same magic.
+    "cd /content/drive/MyDrive/project",
+    "cd helpers_repo",
+    "x = 1\n    cd ..\ny = 2",
+    "cd /content/drive/My Drive/project",
+    # One module, copied, moved or linked.
+    "!cp /kaggle/input/my-scripts/helpers_zz.py .",
+    "!mv /tmp/helpers_zz.py /content/",
+    "!ln -s /data/code/helpers_zz.py helpers_zz.py",
+    # Other ways to unpack an archive, and the folder's own package.
+    "!tar -xzf /content/drive/MyDrive/code.tar.gz",
+    "!7z x code.7z",
+    "!python setup.py develop",
+    "%%bash\npython3 setup.py -q install",
+]
+
+
+@pytest.mark.parametrize("cell", BRINGS_CODE)
+def test_a_notebook_that_brings_in_code_has_no_import_looked_up(write, check, not_installed, cell):
+    """A notebook that fetches or unpacks files, changes where Python looks for
+    modules, or installs with conda, uv, Poetry or Pipenv: any import may come from
+    there. So none is a finding, and none is sent."""
+    write("demo.ipynb", jupyter([cell + "\n", "import helpers_zz\nfrom other_zz.sub import x\n"]))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert result.findings == [] and registry.queries == []
+
+
+def test_a_notebook_that_clones_its_code_still_has_its_packages_looked_up(
+    write, check, not_installed
+):
+    """Only the imports are left alone. A ``pip install`` line of the same notebook
+    names its packages, and they are looked up as in any other notebook."""
+    cells = [
+        "!git clone https://github.com/someuser/segment_models.git\n%cd segment_models\n"
+        "!pip install -q torch ghost-dep\n",
+        "import torch\nfrom segment_models.networks import UNet\nimport train_utils\n",
+    ]
+    write("train.ipynb", jupyter(cells))
+    registry = FakeRegistry({"torch"})
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost-dep"] and sorted(registry.queries) == ["ghost-dep", "torch"]
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "!git status",
+        "!git commit -m clone",
+        "!cp notes.txt backup.txt",
+        "!mv results.csv old/",
+        "!ln -s data latest",
+        "!python setup.py --version",
+        "!python setup.py sdist",
+        "!python train.py install",
+        "cd = 3",
+        "cd, rest = 1, 2",
+        "cd=3\nabcd /tmp",
+        "!cd data && ls",
+        "%%bash\ncd data\nls",
+        "%conda list",
+        "!uv --version",
+        "!poetry show",
+        "!pipenv --version",
+        "!echo wget",
+        "import os\nprint(os.path.join('a', 'b'))",
+        "tool = 'curl'\nplatform = sys.platform",
+    ],
+)
+def test_a_command_that_brings_in_no_code_leaves_the_imports_checked(
+    write, check, not_installed, cell
+):
+    """The look-alike cases: other subcommands of the same tools, a copy of one file,
+    a ``cd`` in a shell line (it changes nothing for the notebook), and text that
+    only holds a command's name. The invented import is still reported."""
+    write("demo.ipynb", jupyter([cell + "\n", "import helpers_zz\n"]))
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert subjects(result) == ["helpers_zz"]
 
 
 def test_a_notebook_whose_installs_all_have_names_has_its_imports_looked_up(
@@ -656,15 +854,16 @@ def test_a_notebook_whose_installs_all_have_names_has_its_imports_looked_up(
 
 
 def test_which_notebooks_are_read(write, tmp_path, not_installed, monkeypatch):
-    """A notebook is read when it is checked. With ``check_imports`` the other
-    notebooks of the project are read too, because what they install is declared.
-    An excluded notebook is never read."""
+    """Every notebook of the project is read in every run, also one that is not
+    checked: a package that it installs from git or a URL is the same package in the
+    other files. Its imports are only collected with ``check_imports``. An excluded
+    notebook is never read."""
     read = []
     real = packages.scan_notebook
     monkeypatch.setattr(
         packages,
         "scan_notebook",
-        lambda text, rel, imports: read.append(rel) or real(text, rel, imports),
+        lambda text, rel, imports: read.append((rel, imports)) or real(text, rel, imports),
     )
     write("nb/a.ipynb", jupyter(["%pip install ghost-a\nimport from_b, from_skipped\n"]))
     write("nb/b.ipynb", jupyter(["%pip install from-b\n"]))
@@ -672,15 +871,38 @@ def test_which_notebooks_are_read(write, tmp_path, not_installed, monkeypatch):
     one = [tmp_path / "nb" / "a.ipynb"]
     registry = FakeRegistry(set())
     result = run(one, tmp_path, registry, select=["SLOP001"], exclude=["old"])
-    assert subjects(result) == ["ghost-a"] and read == ["nb/a.ipynb"]
+    assert sorted(read) == [("nb/a.ipynb", False), ("nb/b.ipynb", False)]
+    # The other notebook is read, not checked: its own package is not looked up.
+    assert subjects(result) == ["ghost-a"] and registry.queries == ["ghost-a"]
 
     read.clear()
     registry = FakeRegistry(set())
     result = run(one, tmp_path, registry, select=["SLOP001"], exclude=["old"], check_imports=True)
-    assert sorted(read) == ["nb/a.ipynb", "nb/b.ipynb"]
+    assert sorted(read) == [("nb/a.ipynb", True), ("nb/b.ipynb", True)]
     # from-b is declared by the other notebook, so its import is not looked up.
     assert subjects(result) == ["ghost-a", "from_skipped"]
     assert "from-b" not in registry.queries and "from_b" not in registry.queries
+
+
+def test_the_engine_takes_imports_from_a_dependency_file_of_any_kind(
+    write, check, not_installed, monkeypatch
+):
+    """``engine.run`` asks the checker for the imports that dependency files hold, and
+    never for the kind of a file. So the next source that carries imports is looked
+    up without a change to the engine."""
+    real = packages.scan_notebook
+
+    def of_another_kind(text, rel, imports):
+        """What the notebook reader found, as if another kind of file held it."""
+        declared = real(text, rel, imports)
+        declared.kind = Kind.PIPFILE
+        return declared
+
+    monkeypatch.setattr(packages, "scan_notebook", of_another_kind)
+    write("demo.ipynb", jupyter(["import ghost_mod\n"]))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert subjects(result) == ["ghost_mod"] and "ghost_mod" in registry.queries
 
 
 def test_only_slop001_reads_notebooks(write, check):
@@ -733,11 +955,16 @@ def test_files_that_are_not_python_notebooks(text, write, check):
         "x = " + "(" * 5000 + "1" + ")" * 5000 + "\n!pip install deep-one\nimport deep_mod\n",
         # More than the parser takes: it gives up with a MemoryError or a RecursionError.
         "x = " + "~" * 20000 + "1\n!pip install deep-two\n",
-        "x = " + " + ".join(["1"] * 100000) + "\n%pip install deep-three\n",
+        pytest.param(
+            "x = " + " + ".join(["1"] * 100000) + "\n%pip install deep-three\n",
+            marks=needs_parser_depth_limit,
+        ),
         "!pip install " + "a" * 5000 + "\n",
         "%pip install 'unterminated\n",
         "\x00!pip install nul\n",
         "import a\n\tb = 1\n  c = 2\n!pip install mixed-indent\n",
+        # Python's parser takes this text, and its tokenizer fails on it since 3.12.
+        "%pip install cr-cell\n\r\u00e9tape = 1  # first step\n",
     ],
     ids=[
         "5,000 nested brackets",
@@ -747,6 +974,7 @@ def test_files_that_are_not_python_notebooks(text, write, check):
         "an open quote",
         "a NUL",
         "mixed indentation",
+        "a carriage return before a letter that is not ASCII",
     ],
 )
 def test_cells_that_are_hard_to_read_never_stop_the_run(write, check, cell):
@@ -755,6 +983,42 @@ def test_cells_that_are_hard_to_read_never_stop_the_run(write, check, cell):
     write("n.ipynb", jupyter([cell, "%pip install ghost-after\n"]))
     result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
     assert "ghost-after" in subjects(result) and result.parse_errors == []
+
+
+IGNORED_IMPORT = "import corp_private_zz  # slopfence: ignore\n"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        ["x = 1\r", IGNORED_IMPORT, "import ghost_next\n"],
+        ["x = 1  # first\n", "\r\u00e9tape = 2\n", IGNORED_IMPORT, "import ghost_next\n"],
+        ['text = """a\rb"""\n', IGNORED_IMPORT, "import ghost_next\n"],
+    ],
+    ids=["at a line end", "before a letter that is not ASCII", "inside a string"],
+)
+def test_a_carriage_return_inside_a_cell_line_moves_no_import(tmp_path, not_installed, source):
+    """Python's parser ends a line at a carriage return that no line feed follows, and
+    the lines of the cell do not. An import below it could only be matched to the
+    wrong line: the one under an ignore comment would be sent, and reported where the
+    next import is. So no import of such a cell is looked up. Its pip lines are, and
+    so are the imports of the same cell with a line feed in its place."""
+    nb = notebook([])
+    nb["cells"] += [
+        {"cell_type": "code", "metadata": {}, "outputs": [], "source": source},
+        {"cell_type": "code", "metadata": {}, "outputs": [], "source": ["%pip install ghost-pip"]},
+    ]
+    path = tmp_path / "nb.ipynb"
+    path.write_text(json.dumps(nb, indent=1, ensure_ascii=False), encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"], check_imports=True)
+    assert subjects(result) == ["ghost-pip"] and registry.queries == ["ghost-pip"]
+
+    path.write_text(path.read_text(encoding="utf-8").replace("\\r", "\\n"), encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"], check_imports=True)
+    assert sorted(subjects(result)) == ["ghost-pip", "ghost_next"]
+    assert not any("corp" in name for name in registry.queries)
 
 
 def test_read_notebook_keeps_code_cells_only():
@@ -806,6 +1070,80 @@ def test_crlf_files_and_bom(tmp_path, check):
     [finding] = check("SLOP001", registry=FakeRegistry(set())).findings
     line = text.split("\n")[finding.line - 1]
     assert line[finding.col - 1 :].startswith("ghost-crlf")
+
+
+# Every kind of notebook finding, and every kind of ignore comment.
+EVERY_KIND = [
+    "%pip install requests ghost-magic\nimport requests, ghost_import\n",
+    "!pip install ghost-first \\\n    ghost-continued\n",
+    "%%bash\npip install ghost-shell \\\n  ghost-shell-two\necho done\n",
+    "# slopfence: ignore\n!pip install ignored-above\n"
+    "!pip install ignored-inline  # slopfence: ignore\n"
+    "!pip install ignored-first \\\n    ignored-continued  # slopfence: ignore\n",
+    "from ghost_from import x\nimport ignored_import  # slopfence: ignore\n",
+    # A continued line that is empty: the imports below it must stay on their lines.
+    "!pip install ghost-blank \\\n\nimport ignored_below  # slopfence: ignore\n"
+    "import ghost_below\nimport os\n",
+    "%pip install requests \\\n\nimport ghost_last\n",
+]
+
+
+@pytest.mark.parametrize("minified", [False, True], ids=["jupyter", "minified"])
+def test_windows_line_ends_in_cell_sources_change_no_finding(
+    tmp_path, check, not_installed, minified
+):
+    """A notebook whose source strings end in a carriage return and a line feed gets
+    the findings of the same notebook without the carriage returns, each at its
+    name, and the same names are sent. In Jupyter's layout they are at the same
+    line and column too."""
+
+    def scan(cells):
+        """Write the notebook and return (its text, the result, the names sent)."""
+        nb = notebook(cells)
+        text = json.dumps(nb, separators=(",", ":")) if minified else jupyter(cells)
+        (tmp_path / "nb.ipynb").write_text(text, encoding="utf-8")
+        registry = FakeRegistry({"requests"})
+        result = check("SLOP001", registry=registry, check_imports=True)
+        return text, result, registry.queries
+
+    _, unix, unix_sent = scan(EVERY_KIND)
+    text, windows, windows_sent = scan(crlf(EVERY_KIND))
+    assert subjects(windows) == subjects(unix)
+    assert sorted(subjects(windows)) == [
+        "ghost-blank", "ghost-continued", "ghost-first", "ghost-magic", "ghost-shell",
+        "ghost-shell-two", "ghost_below", "ghost_from", "ghost_import", "ghost_last",
+    ]  # fmt: skip
+    assert windows_sent == unix_sent and not any("ignored" in name for name in windows_sent)
+    lines = text.split("\n")
+    for finding in windows.findings:
+        at = lines[finding.line - 1][finding.col - 1 :]
+        assert at.startswith((finding.subject, "import ", "from ")), finding
+    if not minified:
+        assert found(windows) == found(unix)
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        f"-i {PRIVATE}",
+        f"--index corp={PRIVATE}",
+        f"--default-index {PRIVATE}",
+        "-f https://pkgs.corp.example/wheels.html",
+        "--no-index",
+    ],
+)
+@pytest.mark.parametrize("command", ["!pip", "%pip", "pip", "!uv pip"])
+def test_a_source_option_on_a_continued_line_counts_with_windows_line_ends(
+    write, check, command, option
+):
+    """A backslash before a carriage return and a line feed continues the command, as
+    one before a line feed does. So the index or links option on the next line is
+    read, and none of the notebook's packages is sent."""
+    cells = [f"{command} install corp-auth \\\r\n    {option}\r\n", "%pip install corp-utils\r\n"]
+    write("nb.ipynb", jupyter(cells))
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
 
 
 def test_a_very_large_notebook_is_not_read(tmp_path, check):
