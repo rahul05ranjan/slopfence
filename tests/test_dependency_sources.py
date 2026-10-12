@@ -1395,6 +1395,16 @@ def test_an_index_in_an_excluded_file_is_not_inherited(write, check):
     assert found(result) == [("setup.cfg", 3, 1)] and result.notes == []
 
 
+@pytest.mark.parametrize("folder", ["build", "dist", "env", "venv", ".tox", "x.egg-info"])
+def test_an_index_in_a_folder_that_is_never_read_is_not_inherited(write, check, folder):
+    """Build output and virtual environments are never walked, so a requirements file
+    in one of them says nothing about the project."""
+    write(f"{folder}/requirements.txt", INDEX + "x\n")
+    write("setup.cfg", "[options]\ninstall_requires =\n    ghost-lib\n")
+    result = check("SLOP001", registry=FakeRegistry(set()))
+    assert found(result) == [("setup.cfg", 3, 1)] and result.notes == []
+
+
 def test_detect_private_index_false_switches_inheritance_off(write, check):
     """An index that only mirrors PyPI must not switch the new files off. The file
     that names the index stays private."""
