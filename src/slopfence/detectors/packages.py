@@ -29,7 +29,7 @@ import re
 import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
     MARKER_NAMES,
@@ -81,6 +81,8 @@ PIPFILE_TABLES = ("packages", "dev-packages")
 # markers. An entry with any other key comes from somewhere else (git, path, file,
 # url) or isn't understood (an unquoted dotted name makes a table inside a table).
 _PIPFILE_INDEX_KEYS = MARKER_NAMES | {"version", "extras", "markers", "index", "editable"}
+# The two files that setuptools reads as one distribution.
+_SETUPTOOLS_KINDS = (Kind.SETUP_CFG, Kind.SETUP_PY)
 # The kinds of file that say where an install gets its packages. A private index in
 # one of them also covers the files that can't say (see ``DependencyFile.inherits_index``).
 _INSTALL_KINDS = (Kind.REQUIREMENTS, Kind.PYPROJECT, Kind.PIPFILE)
@@ -174,6 +176,7 @@ def build_index(
             index.local_modules.add(parent.name)
     for path in dep_files:
         index.files.append(parse_dependency_file(path, root, imports))
+    _share_setuptools_sources(index.files)
     for path in lock_files:
         if not imports and path.name not in INDEX_LOCK_FILES:
             continue  # a big lock file is only worth reading for its names
@@ -182,6 +185,20 @@ def build_index(
         if private:
             index.private_lock_files.append(_rel(path, root))
     return index
+
+
+def _share_setuptools_sources(files: list[DependencyFile]) -> None:
+    """Let a ``setup.cfg`` and the ``setup.py`` next to it agree on where packages come from.
+
+    setuptools reads the two as one distribution. Links or an index named in one of
+    them (``dependency_links``, ``[easy_install] index_url``) hold for the
+    requirements in the other.
+    """
+    setuptools_files = [file for file in files if file.kind in _SETUPTOOLS_KINDS]
+    private = {PurePosixPath(file.rel).parent for file in setuptools_files if file.private_index}
+    for file in setuptools_files:
+        if PurePosixPath(file.rel).parent in private:
+            file.make_private()
 
 
 def parse_lock_file(path: Path) -> tuple[set[str], bool]:

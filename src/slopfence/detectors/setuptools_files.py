@@ -23,6 +23,7 @@ from slopfence.detectors.dependency import (
     requirements_comment,
     suppresses_slop001,
 )
+from slopfence.indexes import is_public_index
 from slopfence.source import IGNORE_FILE_RE, SourceFile, walk
 
 # setup() keywords and [options] keys that hold requirement lists.
@@ -30,6 +31,9 @@ REQUIRES_KEYS = ("install_requires", "setup_requires", "tests_require")
 EXTRAS_KEY = "extras_require"
 # Links to pages or files where packages may come from instead of PyPI.
 LINKS_KEY = "dependency_links"
+# The setup.cfg section with the index and the links that setuptools itself installs
+# from: the packages of ``setup_requires`` and ``tests_require``.
+EASY_INSTALL = "easy_install"
 _SECTION = re.compile(r"\[(?P<header>.+)\]")
 # The option's name runs up to the first "=" or ":". White space at its end is cut
 # afterwards: a pattern that skipped it would walk a long run of spaces once per space.
@@ -133,6 +137,22 @@ def _cfg_requirements(lines: list[_ValueLine]) -> Iterator[tuple[int, Requiremen
                 yield lineno, parsed
 
 
+def _cfg_names_a_source(values: dict[tuple[str, str], list[_ValueLine]]) -> bool:
+    """Whether a setup.cfg says that packages may come from another place than PyPI.
+
+    That is ``[options] dependency_links``, ``[easy_install] find_links``, and
+    ``[easy_install] index_url`` with an index that is not PyPI. An option without a
+    value is not in ``values``, so it names nothing.
+    """
+    for (section, option), lines in values.items():
+        key = _cfg_key(option)
+        if (section, key) in {("options", LINKS_KEY), (EASY_INSTALL, "find_links")}:
+            return True
+        if (section, key) == (EASY_INSTALL, "index_url") and not is_public_index(lines[0][1]):
+            return True
+    return False
+
+
 def parse_setup_cfg(text: str, rel: str) -> DependencyFile:
     """Dependencies in setup.cfg: ``[options]`` ``install_requires``, ``setup_requires``
     and ``tests_require``, and every key of ``[options.extras_require]``.
@@ -146,9 +166,7 @@ def parse_setup_cfg(text: str, rel: str) -> DependencyFile:
         return found
     comments = _cfg_comments(text)
     ignore_file = any(IGNORE_FILE_RE.search(c) for c in comments)
-    # Packages may come from these links instead of PyPI.
-    private = any(s == "options" and _cfg_key(o) == LINKS_KEY for s, o in values)
-    found.private_index = private
+    private = found.private_index = _cfg_names_a_source(values)
     for (section, option), lines in values.items():
         if section == "metadata" and _cfg_key(option) == "name":
             found.project_names.add(lines[0][1])

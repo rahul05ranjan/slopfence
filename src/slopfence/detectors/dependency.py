@@ -151,6 +151,13 @@ class DependencyFile:
     # Notebooks only: the file is too large to be read (see ``notebooks.MAX_BYTES``).
     too_large: bool = False
 
+    def make_private(self) -> None:
+        """Record that the file's packages may come from another place than PyPI: none
+        of them is looked up."""
+        self.private_index = True
+        for dep in self.dependencies:
+            dep.validate = False
+
     @property
     def read_by_v02(self) -> bool:
         """Whether v0.2 already read this file: ``pyproject.toml`` and ``requirements*.txt``.

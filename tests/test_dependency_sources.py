@@ -1270,6 +1270,56 @@ def test_dependency_links_stop_import_lookups(write, check, not_installed):
     ]
 
 
+REQUIRES = "install_requires =\n    corp-auth\nsetup_requires = corp-build\n"
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        f"[easy_install]\nindex_url = {PRIVATE}\n\n[options]\n{REQUIRES}",
+        f"[easy_install]\nindex-url = {PRIVATE}\n\n[options]\n{REQUIRES}",
+        f"[easy_install]\nfind_links = https://corp.example/wheels\n\n[options]\n{REQUIRES}",
+        f"[easy_install]\nFind-Links =\n    ./wheels\n\n[options]\n{REQUIRES}",
+        f"[options]\ndependency_links = https://corp.example/links\n{REQUIRES}",
+    ],
+    ids=["index_url", "index-url", "find_links", "Find-Links", "dependency_links"],
+)
+def test_a_setup_cfg_that_names_a_source_covers_the_setup_py_next_to_it(write, tmp_path, cfg):
+    """setuptools reads ``setup.cfg`` and the ``setup.py`` next to it as one
+    distribution. An index or links in the first hold for the names in the second,
+    also when only one of the two is checked. A ``setup.py`` elsewhere is not covered."""
+    cfg_path = write("pkg/setup.cfg", cfg)
+    setup = "from setuptools import setup\nsetup(name='x', install_requires=['corp-core'])\n"
+    py_path = write("pkg/setup.py", setup)
+    for paths in ([tmp_path], [cfg_path], [py_path]):
+        registry = FakeRegistry(set())
+        result = run(paths, tmp_path, registry, select=["SLOP001"])
+        assert result.findings == [] and registry.queries == [] and result.notes == []
+    write("other/setup.py", setup.replace("corp-core", "ghost-lib"))
+    registry = FakeRegistry(set())
+    result = run([tmp_path], tmp_path, registry, select=["SLOP001"])
+    assert found(result) == [("other/setup.py", 2, 35)] and registry.queries == ["ghost-lib"]
+
+
+def test_a_setup_py_with_links_covers_the_setup_cfg_next_to_it(write, check):
+    """The same the other way round: ``dependency_links`` passed to ``setup()``."""
+    write(
+        "setup.py", "from setuptools import setup\nsetup(dependency_links=['https://c.example'])\n"
+    )
+    write("setup.cfg", f"[options]\n{REQUIRES}")
+    registry = FakeRegistry(set())
+    assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+
+
+def test_an_easy_install_index_that_is_pypi_changes_nothing(write, check):
+    """``index_url`` with PyPI's own address, or with no value, names no other source."""
+    for index in ("index_url = https://pypi.org/simple", "index_url ="):
+        write("setup.cfg", f"[easy_install]\n{index}\n\n[options]\ninstall_requires = ghost-lib\n")
+        registry = FakeRegistry(set())
+        assert found(check("SLOP001", registry=registry)) == [("setup.cfg", 5, 1)]
+        assert registry.queries == ["ghost-lib"]
+
+
 def test_lock_files_are_only_read_for_what_the_run_needs(write, check, monkeypatch):
     """Without ``check_imports`` nobody asks for the names in a lock file. Only
     ``Pipfile.lock`` is read then, because it can name an index."""
