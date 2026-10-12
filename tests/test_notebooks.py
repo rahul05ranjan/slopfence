@@ -60,7 +60,7 @@ def subjects(result):
 def pip(line):
     """What the pip install commands on a line say: the names that may be looked up,
     the names that may not, whether a private index is named, and whether links are.
-    "not pip" when no command is ``pip install``, None when one can't be read."""
+    "not pip" when no command is ``pip install``."""
     commands, _ = shell_commands(line, 0)
     public, held_back, index, links, seen = [], [], False, False, False
     for words in commands:
@@ -69,8 +69,6 @@ def pip(line):
             continue
         seen = True
         install = pip_requirements(arguments)
-        if install is None:
-            return None
         for name, _, sourced in install.packages:
             (held_back if sourced or install.variables else public).append(name)
         index, links = index or install.private_index, links or install.links
@@ -136,10 +134,18 @@ def test_pip_install_lines(line, names):
         ("pip install $OPTS corp-auth", ([], ["corp-auth"], False, False)),
         ("pip install corp-auth --index-url $index", ([], ["corp-auth"], True, False)),
         ('pip install "pkg\\$x" other', ([], ["other"], False, False)),
-        # An option this version doesn't know could take a value: skip the command.
-        ("pip install --some-new-option value foo", None),
-        ("pip install -x foo", None),
-        ("pip install -qx foo", None),
+        # An option this version doesn't know could take a value: no word of the
+        # command is taken for a package.
+        ("pip install --some-new-option value foo", ([], [], False, False)),
+        ("pip install -x foo", ([], [], False, False)),
+        ("pip install -qx foo", ([], [], False, False)),
+        # What such a command says about an index still counts, whatever the value is.
+        ("pip install --new-flag -i https://corp.example/simple corp", ([], [], True, False)),
+        ("pip install --new-flag -ihttps://corp.example/simple corp", ([], [], True, False)),
+        ("uv pip install --new-flag --index https://c.example/s corp", ([], [], True, False)),
+        ("pip install --new-flag --index-url=https://pypi.org/simple x", ([], [], True, False)),
+        ("pip install --new-flag --find-links=./wheels x", ([], [], False, True)),
+        ("pip install -x -f ./wheels x", ([], [], False, True)),
         ("pip install 'unterminated", "not pip"),
         ("pip download foo", "not pip"),
         ("pip --quiet install foo", "not pip"),
@@ -276,6 +282,10 @@ def test_checkpoint_folders_are_never_walked(write, tmp_path):
         "%pip install -i https://test.pypi.org/simple/ corp-a\n",
         "%pip install --no-index corp-a\n",
         "!pip install corp-a -f https://corp.example/wheels.html\n",
+        # A command with an option that is not known: its index still counts.
+        f"!pip install --brand-new-flag -i {PRIVATE} corp-a\n",
+        f"!uv pip install --brand-new-flag --index {PRIVATE} corp-a\n",
+        "!pip install --brand-new-flag -f ./wheels corp-a\n",
     ],
 )
 def test_a_private_source_covers_the_whole_notebook(write, check, cell):

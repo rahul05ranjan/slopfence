@@ -208,11 +208,25 @@ def _package(word: Word) -> tuple[str, Word, bool] | None:
     return (parsed.name, word, parsed.direct) if parsed else None
 
 
-def pip_requirements(arguments: list[Word]) -> PipInstall | None:
+def _unread(arguments: list[Word]) -> PipInstall:
+    """What is known of a command that has an option this module doesn't know.
+
+    None of its packages: the value of the unknown option could be taken for one.
+    An index or links option among its words still says that packages may come
+    from another place than PyPI, whatever its value is.
+    """
+    options = [word.text.partition("=")[0] for word in arguments if word.text.startswith("-")]
+    return PipInstall(
+        private_index=any(option in INDEX_OPTIONS or option[:2] == "-i" for option in options),
+        links=any(option in LINK_OPTIONS or option[:2] == "-f" for option in options),
+    )
+
+
+def pip_requirements(arguments: list[Word]) -> PipInstall:
     """What a ``pip install`` command names, from the words after ``install``.
 
-    Returns None when the command has an option this function doesn't know: its
-    value could be mistaken for a package.
+    A command with an option this function doesn't know names no package here (see
+    ``_unread``).
     """
     found = PipInstall()
     words = iter(arguments)
@@ -230,7 +244,7 @@ def pip_requirements(arguments: list[Word]) -> PipInstall | None:
         if not option.startswith("--") and len(option) > 2:
             short = _short_options(option)
             if short is None:
-                return None
+                return _unread(arguments)
             option, attached = short
             has_value, value = ("=", attached) if attached else ("", "")
         if option in PIP_VALUE_OPTIONS:
@@ -239,7 +253,7 @@ def pip_requirements(arguments: list[Word]) -> PipInstall | None:
             if option in INDEX_OPTIONS and not is_public_index(named_index_url(value)):
                 found.private_index = True
         elif option and option not in PIP_FLAGS:
-            return None
+            return _unread(arguments)
         found.links = found.links or option in LINK_OPTIONS
     found.variables = any(_UNEXPANDED.search(word.text) for word in arguments)
     return found

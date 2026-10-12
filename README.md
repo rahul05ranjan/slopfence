@@ -196,7 +196,7 @@ Known limit: a list for another tool whose names mostly exist on PyPI too (`git`
 **Notebooks.** A finding has the line and column of the `.ipynb` file itself, the lines that `git diff` shows. So `--diff` and SARIF work. A notebook saved on one line has all its findings on line 1, at different columns. Some details:
 
 - Only `SLOP001` reads notebooks, and only their code cells.
-- A `pip install` command is read as text and never run. A command with an option slopfence doesn't know is skipped. When a command holds a variable (`$PKG`, `{pkg}`), none of its names is looked up.
+- A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. An index or links option in it still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`), none of its names is looked up.
 - A notebook larger than 20 MB is not read, and a note says so.
 - To leave notebooks out, add `"*.ipynb"` to `exclude`.
 

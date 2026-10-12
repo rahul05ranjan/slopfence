@@ -384,7 +384,7 @@ def _offset(lines: list[str], lineno: int, col: int) -> int:
 
 
 def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool, tuple[int, int]]]:
-    """Every ``pip install`` command of a cell that could be read.
+    """Every ``pip install`` command of a cell.
 
     Yields what the command says, whether an ignore comment covers it, and the part
     of the cell's text its arguments take up. The comment may be at the end of the
@@ -403,10 +403,8 @@ def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool, tu
             above.startswith("#") and suppresses_slop001(above)
         )
         for words in commands:
-            arguments = pip_install_arguments(words)
-            install = pip_requirements(arguments) if arguments else None
-            if install is not None:
-                yield install, ignored, (arguments[0].start, arguments[-1].end)
+            if arguments := pip_install_arguments(words):
+                yield pip_requirements(arguments), ignored, (arguments[0].start, arguments[-1].end)
 
 
 def _mentions_an_index(text: str, understood: list[tuple[int, int]]) -> bool:
