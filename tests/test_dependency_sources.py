@@ -340,6 +340,66 @@ def test_find_links_makes_only_its_own_file_private(write, check, option):
 
 # --- Lists for another tool -------------------------------------------------------------
 
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"--pre --extra-index-url {PRIVATE}",
+        f"--trusted-host pkgs.corp.example --index-url {PRIVATE}",
+        f"--index-url https://pypi.org/simple --extra-index-url {PRIVATE}",
+        f"--prefer-binary -i {PRIVATE}",
+        f"--pre --extra-index-url={PRIVATE}  # the company index",
+        f"-i{PRIVATE}",
+        f"--extra-index {PRIVATE}",
+        f"--i={PRIVATE}",
+    ],
+)
+def test_an_index_option_counts_anywhere_on_an_option_line(write, check, line):
+    """pip takes several options on one line, a value attached to ``-i``, and a long
+    option cut short. The index is seen in each, for the file and for the files
+    that inherit from it."""
+    write("requirements.txt", f"{line}\ncorp-auth==1.0\n")
+    write("setup.py", "from setuptools import setup\nsetup(install_requires=['corp-core'])\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert "a private package index is set in requirements.txt" in result.notes[0]
+
+
+@pytest.mark.parametrize(
+    "line", ["--pre --find-links ./wheels", "-f./wheels", "--find ./wheels", "--pre --no-i"]
+)
+def test_a_links_option_counts_anywhere_on_an_option_line(write, check, line):
+    """The same for ``--find-links`` and ``--no-index``, which cover their own file."""
+    write("requirements.txt", f"{line}\ncorp-auth==1.0\n")
+    write("constraints.txt", "ghost-pin==1.0\n")
+    registry = FakeRegistry(set())
+    assert found(check("SLOP001", registry=registry)) == [("constraints.txt", 1, 1)]
+    assert registry.queries == ["ghost-pin"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "--pre --index-url https://pypi.org/simple",
+        "--extra-index-url=https://pypi.org/simple --prefer-binary",
+        "-ihttps://pypi.org/simple",
+        # Not options of the file: a hash that continues a requirement, an option
+        # after a requirement (pip does not take an index from there), a comment.
+        "--hash=sha256:abc --hash=sha256:fff",
+        f"requests --index-url {PRIVATE}",
+        f"# --extra-index-url {PRIVATE}",
+        "--editable ./local --install-option=--fast",
+    ],
+)
+def test_lines_that_name_no_private_index(write, check, line):
+    """PyPI's own address, and words that only look like an index option."""
+    write("requirements.txt", f"{line}\nghost-lib==1.0\n")
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("requirements.txt", 2, 1)] and result.notes == []
+
+
 APT_LIST = "build-essential\nlibpq-dev\nlibxml2-dev\nrequests\n"
 
 

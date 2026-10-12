@@ -27,7 +27,7 @@ import importlib.util
 import json
 import re
 import sys
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -59,9 +59,12 @@ else:  # pragma: no cover
 
 
 _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
-_INDEX_OPTION = re.compile(r"\s*(?:-i|--index-url|--extra-index-url)(?:\s*=\s*|\s+)(\S+)")
+# The options of a requirements file that name a package index. pip also takes a long
+# option cut short, down to the given start: "--extra-index" is one, and "--e" is not,
+# because it could be "--editable" too.
+_INDEX_OPTIONS = {"--index-url": "--i", "--extra-index-url": "--ex"}
 # --find-links and --no-index add a package source too, whatever their value is.
-_LINKS_OPTION = re.compile(r"\s*(?:-f|--find-links|--no-index)(?=[\s=]|$)")
+_LINKS_OPTIONS = {"--find-links": "--f", "--no-index": "--no-i"}
 # Per-requirement options that may follow a requirement on its line (--hash=...). A
 # match starts where a run of white space starts, so a long run is only walked once.
 _LINE_OPTIONS = re.compile(r"(?<!\s)\s+--[A-Za-z].*$")
@@ -310,18 +313,39 @@ def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> Depe
     return found
 
 
+def _is_option(word: str, short: str, long: Mapping[str, str]) -> bool:
+    """Whether a word of an option line is one of the given options.
+
+    ``short`` is the one-letter form, which may have its value attached
+    (``-ihttps://...``). ``long`` maps each long form to the shortest start of it
+    that pip still takes for it.
+    """
+    if not word.startswith("--"):
+        return word.startswith(short)
+    name = word.partition("=")[0]
+    return any(full.startswith(name) and name.startswith(start) for full, start in long.items())
+
+
 def _requirements_sources(lines: list[str]) -> tuple[bool, bool]:
     """Which package sources other than PyPI a requirements file names itself.
 
     The first answer is a non-PyPI ``--index-url`` or ``--extra-index-url``. The
     second is ``--find-links`` or ``--no-index``: no index, but a name that PyPI
-    doesn't have may come from there.
+    doesn't have may come from there. pip reads options from a line that starts
+    with one, and such a line may hold several.
     """
     index = links = False
     for raw in lines:
-        line = REQ_COMMENT.sub("", raw)
-        links = links or bool(_LINKS_OPTION.match(line))
-        index = index or bool((m := _INDEX_OPTION.match(line)) and not is_public_index(m.group(1)))
+        words = REQ_COMMENT.sub("", raw).split()
+        if not words or not words[0].startswith("-"):
+            continue
+        for word, following in zip(words, [*words[1:], ""], strict=True):
+            if _is_option(word, "-f", _LINKS_OPTIONS):
+                links = True
+            elif _is_option(word, "-i", _INDEX_OPTIONS):
+                # The URL is attached ("--index-url=URL", "-iURL") or it is the next word.
+                attached = word.partition("=")[2] if word.startswith("--") else word[2:]
+                index = index or not is_public_index(attached or following)
     return index, links
 
 
