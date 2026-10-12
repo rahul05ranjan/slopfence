@@ -1306,6 +1306,39 @@ def test_a_pyproject_with_another_shape_does_not_stop_the_run(write, check, body
     assert found(result) == [("requirements.txt", 1, 1)]
 
 
+DEEP = "x = " + "[" * 5000 + "]" * 5000 + "\n"
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("pyproject.toml", DEEP),
+        ("pyproject.toml", "x = " + "9" * 10_000 + "\n"),
+        ("Pipfile", DEEP),
+        ("uv.lock", DEEP),
+        ("uv.lock", "package = 3\n"),
+        ("Pipfile.lock", "[" * 100_000),
+        ("Pipfile.lock", '{"default": 3, "_meta": {"sources": 4}}'),
+    ],
+    ids=[
+        "nested pyproject.toml",
+        "huge number",
+        "nested Pipfile",
+        "nested uv.lock",
+        "uv.lock with another shape",
+        "nested JSON",
+        "Pipfile.lock with another shape",
+    ],
+)
+def test_a_file_the_toml_or_json_reader_gives_up_on_does_not_stop_the_run(write, check, name, text):
+    """A generated file with thousands of nested brackets, or a number of ten thousand
+    digits, is not one the reader takes. It is skipped, wherever in the project it is."""
+    write(f"tests/fixtures/odd/{name}", text)
+    write("requirements.txt", "ghost-lib\n")
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert found(result) == [("requirements.txt", 1, 1)]
+
+
 # --- --diff, exclude, baseline, SARIF ---------------------------------------------------
 
 

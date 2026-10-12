@@ -181,10 +181,11 @@ def parse_lock_file(path: Path) -> tuple[set[str], bool]:
             names = {n for group in ("default", "develop") for n in data.get(group, {})}
             return names, pipfile_is_private({"source": meta.get("sources", [])})
         data = tomllib.loads(text)
-    except (ValueError, AttributeError, TypeError):
+    # RecursionError: arrays nested thousands deep, in a file nobody wrote by hand.
+    except (ValueError, AttributeError, TypeError, RecursionError):
         return set(), False
     # uv.lock, poetry.lock and pdm.lock all have [[package]] tables with a name.
-    packages = data.get("package", [])
+    packages = _array(data.get("package"))
     names = {p["name"] for p in packages if isinstance(p, dict) and isinstance(p.get("name"), str)}
     return names, False
 
@@ -412,6 +413,19 @@ class _LineFinder:
         return 0 < line <= len(self.comments) and suppresses_slop001(self.comments[line - 1])
 
 
+def _load_toml(text: str) -> dict | None:
+    """The tables of a TOML file, or None when it can't be read.
+
+    Not only a file that is not TOML: one with a number too long to convert, or with
+    arrays nested thousands deep, can't be read either. Every ``pyproject.toml`` and
+    ``Pipfile`` of the project is read, so no such file may end the run.
+    """
+    try:
+        return tomllib.loads(text)
+    except (ValueError, RecursionError):
+        return None
+
+
 def _table(value: object) -> dict:
     """``value`` if it is a TOML table, else an empty one.
 
@@ -429,9 +443,8 @@ def _array(value: object) -> list:
 def _parse_pyproject(text: str, rel: str) -> DependencyFile:
     """Dependencies in pyproject.toml: PEP 621, dependency groups and Poetry tables."""
     found = DependencyFile(rel, Kind.PYPROJECT)
-    try:
-        data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
+    data = _load_toml(text)
+    if data is None:
         return found
     finder = _LineFinder(text)
     deps = found.dependencies
@@ -512,9 +525,8 @@ def _parse_pipfile(text: str, rel: str) -> DependencyFile:
     file's PyPI sources is declared but not looked up. So is one that isn't understood.
     """
     found = DependencyFile(rel, Kind.PIPFILE)
-    try:
-        data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
+    data = _load_toml(text)
+    if data is None:
         return found
     finder = _LineFinder(text)
     private = found.private_index = pipfile_is_private(data)
