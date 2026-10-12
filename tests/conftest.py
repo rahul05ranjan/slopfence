@@ -118,7 +118,8 @@ def write(tmp_path: Path) -> Callable[[str, str], Path]:
     def _write(rel: str, content: str) -> Path:
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(textwrap.dedent(content).lstrip("\n"))
+        # UTF-8 on every platform: slopfence reads its files that way.
+        path.write_text(textwrap.dedent(content).lstrip("\n"), encoding="utf-8")
         return path
 
     return _write
