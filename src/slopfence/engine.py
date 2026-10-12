@@ -12,7 +12,7 @@ from slopfence import diff as diffmod
 from slopfence.analysis import FileSummary, Options, Task, analyze_files
 from slopfence.config import ignored_rules, is_excluded, selected_rules
 from slopfence.detectors import FILE_DETECTORS
-from slopfence.detectors.dependency import NOTEBOOK_SUFFIX, kind_of
+from slopfence.detectors.dependency import NOTEBOOK_SUFFIX, Kind, kind_of
 from slopfence.detectors.duplicates import check_duplicates
 from slopfence.detectors.notebooks import MAX_BYTES as MAX_NOTEBOOK_BYTES
 from slopfence.detectors.packages import (
@@ -360,9 +360,14 @@ def run(
             and not switched_off("SLOP001", s.rel)
         }
         # The imports in the code cells of checked notebooks, under the same opt-in.
-        # Ignore comments were applied when the cells were read.
+        # Ignore comments were applied when the cells were read. Only notebooks: a
+        # setup.py is a dependency file too, and its imports are already in the list.
         imports.update(
-            {f.rel: f.imports for f in index.files if check_imports and f.rel in checked_deps}
+            {
+                f.rel: f.imports
+                for f in index.files
+                if check_imports and f.kind is Kind.NOTEBOOK and f.rel in checked_deps
+            }
         )
         imported = [name for found in imports.values() for name, _, _ in found]
         # One batch with every name the two checks below will ask about.

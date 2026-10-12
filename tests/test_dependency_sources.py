@@ -878,6 +878,18 @@ def test_setup_py_is_still_checked_as_python(write, check):
     assert result.parse_errors == ["setup.py"] and result.findings == []
 
 
+def test_imports_in_setup_py_are_still_looked_up(write, tmp_path, not_installed):
+    """``setup.py`` is a dependency file and a Python file. With ``check_imports`` its
+    imports are looked up like those of any other file, as in v0.2."""
+    path = write("setup.py", "import ghost_build_helper\nfrom setuptools import setup\n")
+    write("app.py", "import ghost_app_helper\n")
+    for paths in ([tmp_path], [path]):
+        registry = FakeRegistry({"setuptools"})
+        result = run(paths, tmp_path, registry, select=["SLOP001"], check_imports=True)
+        assert ("setup.py", "ghost_build_helper") in [(f.path, f.subject) for f in result.findings]
+        assert "ghost_build_helper" in registry.queries
+
+
 # --- Pipfile ----------------------------------------------------------------------------
 
 PIPFILE = """
