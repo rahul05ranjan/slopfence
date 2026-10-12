@@ -12,8 +12,9 @@ from slopfence import diff as diffmod
 from slopfence.analysis import FileSummary, Options, Task, analyze_files
 from slopfence.config import ignored_rules, is_excluded, selected_rules
 from slopfence.detectors import FILE_DETECTORS
-from slopfence.detectors.dependency import kind_of
+from slopfence.detectors.dependency import NOTEBOOK_SUFFIX, kind_of
 from slopfence.detectors.duplicates import check_duplicates
+from slopfence.detectors.notebooks import MAX_BYTES as MAX_NOTEBOOK_BYTES
 from slopfence.detectors.packages import (
     LOCK_FILES,
     PACKAGE_RULES,
@@ -43,6 +44,8 @@ EXCLUDED_DIRS = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    # Jupyter's autosaved copies of notebooks.
+    ".ipynb_checkpoints",
 }
 
 
@@ -96,6 +99,27 @@ def _not_excluded(files: list[Path], root: Path, exclude: Sequence[str]) -> list
     if not exclude:
         return files  # the usual case, and no relative path has to be worked out
     return [p for p in files if not is_excluded(_rel_to(p, root), exclude)]
+
+
+def _dependency_files_to_read(
+    project: list[Path], checked: list[Path], root: Path, exclude: Sequence[str], imports: bool
+) -> list[Path]:
+    """The dependency files that SLOP001 reads: the checked ones, and more of the project.
+
+    Every file of the project but a notebook is read, wherever it is: a private
+    index, or the name of one of the project's own packages, counts for the whole
+    project. A notebook says less and costs more. It is read when it is checked.
+    With ``imports`` the others are read too, for the packages they install, unless
+    they are excluded.
+    """
+    notebooks = _not_excluded(project, root, exclude) if imports else []
+    return sorted(
+        {
+            *checked,
+            *(p for p in project if p.suffix != NOTEBOOK_SUFFIX),
+            *(p for p in notebooks if p.suffix == NOTEBOOK_SUFFIX),
+        }
+    )
 
 
 @dataclass
@@ -244,8 +268,8 @@ def run(
 
     A private index in a project file covers that file. With ``inherit_index`` it also
     covers the dependency files that name no index of their own (``setup.py``,
-    ``setup.cfg``, ``Pipfile``, and requirements files that v0.2 did not read),
-    unless the file that names it is excluded.
+    ``setup.cfg``, ``Pipfile``, notebooks, and requirements files that v0.2 did not
+    read), unless the file that names it is excluded.
 
     Files are parsed and checked in up to ``jobs`` worker processes when there are
     enough of them (see ``analysis.analyze_files``). The result does not depend on
@@ -301,9 +325,7 @@ def run(
     findings = [f for s in sources for f in s.findings]
 
     if "SLOP001" in rules:
-        # Every dependency file of the project is read, and the checked ones that are
-        # not part of it (``slopfence . ../shared/constraints.txt``).
-        to_read = sorted({*dep_files, *project[1]})
+        to_read = _dependency_files_to_read(project[1], dep_files, root, exclude, check_imports)
         index = build_index(root, project[0], to_read, project[2], imports=check_imports)
         checker = PackageChecker(
             index,
@@ -337,6 +359,11 @@ def run(
             and (changed is None or s.rel in changed)
             and not switched_off("SLOP001", s.rel)
         }
+        # The imports in the code cells of checked notebooks, under the same opt-in.
+        # Ignore comments were applied when the cells were read.
+        imports.update(
+            {f.rel: f.imports for f in index.files if check_imports and f.rel in checked_deps}
+        )
         imported = [name for found in imports.values() for name, _, _ in found]
         # One batch with every name the two checks below will ask about.
         checker.prefetch(checked_deps, imported)
@@ -358,6 +385,11 @@ def run(
                 f"private package index is set in {_listed(checker.inherited_from)}, so "
                 "names missing from PyPI may be private packages. If that index only "
                 "mirrors PyPI, set detect-private-index = false."
+            )
+        if too_large := sorted(f.rel for f in index.files if f.too_large and f.rel in checked_deps):
+            result.notes.append(
+                f"SLOP001 didn't read {_listed(too_large)}: a notebook larger than "
+                f"{MAX_NOTEBOOK_BYTES // 2**20} MB is skipped."
             )
         for rel, found in imports.items():
             findings.extend(checker.check_imports(rel, found))

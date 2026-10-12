@@ -1,0 +1,464 @@
+"""Jupyter notebooks as a source of dependencies and imports (SLOP001).
+
+A notebook is JSON. Only code cells are read, and only for two things:
+
+* ``pip install`` lines (``%pip install x``, ``!pip install x``, ...): the
+  packages are declared dependencies;
+* imports, which are only looked up with ``--check-imports``.
+
+Every result carries the line and column in the ``.ipynb`` file itself, so
+``--diff`` and SARIF work. The position of each source string is taken from the
+JSON text while it is decoded, so it is exact for any formatting: Jupyter's
+one-string-per-line layout, other indentation, or a minified file.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import re
+from bisect import bisect_right
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from slopfence.detectors.dependency import (
+    Dependency,
+    DependencyFile,
+    Kind,
+    requirements_comment,
+    suppresses_slop001,
+)
+from slopfence.detectors.pip_commands import (
+    PipInstall,
+    pip_install_arguments,
+    pip_requirements,
+    shell_commands,
+)
+from slopfence.source import SourceFile, parse, top_level_imports
+
+# A notebook larger than this is not read. The whole file has to be in memory to be
+# decoded, with its images and outputs. Notebooks that people write stay far below it.
+MAX_BYTES = 20 * 1024 * 1024
+# A shell line longer than this is generated text, not something a person typed.
+MAX_COMMAND_LENGTH = 4000
+
+# --- Reading the JSON with positions -----------------------------------------------
+
+_WS = re.compile(r"[ \t\n\r]*")
+_DECODER = json.JSONDecoder()
+# One escape in a JSON string body. A surrogate pair decodes to a single character.
+_ESCAPE = re.compile(
+    r"\\(?:u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)", re.S
+)
+
+
+class _Reader:
+    """Walks JSON text and remembers where it is. Values are decoded by ``json``."""
+
+    def __init__(self, text: str) -> None:
+        """Start at the beginning of ``text``."""
+        self.text = text
+        self.i = 0
+
+    def peek(self) -> str:
+        """The next non-blank character ("" at the end)."""
+        self.i = _WS.match(self.text, self.i).end()
+        return self.text[self.i : self.i + 1]
+
+    def _take(self, char: str) -> bool:
+        """Move past ``char`` if it comes next."""
+        if self.peek() == char:
+            self.i += 1
+            return True
+        return False
+
+    def _expect(self, char: str) -> None:
+        """Move past ``char``, which must come next."""
+        if not self._take(char):
+            raise ValueError(f"expected {char!r} at offset {self.i}")
+
+    def value(self) -> object:
+        """Decode the value that starts here and move past it."""
+        self.peek()
+        obj, self.i = _DECODER.raw_decode(self.text, self.i)
+        return obj
+
+    def object_keys(self) -> Iterator[str]:
+        """The keys of the object that starts here. The caller reads each value."""
+        self._expect("{")
+        if self._take("}"):
+            return
+        while True:
+            key = self.value()
+            if not isinstance(key, str):
+                raise ValueError("object key is not a string")
+            self._expect(":")
+            yield key
+            if self._take("}"):
+                return
+            self._expect(",")
+
+    def array_items(self) -> Iterator[None]:
+        """One step per element of the array that starts here. The caller reads each."""
+        self._expect("[")
+        if self._take("]"):
+            return
+        while True:
+            yield None
+            if self._take("]"):
+                return
+            self._expect(",")
+
+
+@dataclass
+class Cell:
+    """A code cell: its text, and where each piece of it sits in the file."""
+
+    text: str = ""
+    # Offset in ``text`` where each source string starts.
+    starts: list[int] = field(default_factory=list)
+    # (start, end) of each source string's JSON token in the file, quotes included.
+    spans: list[tuple[int, int]] = field(default_factory=list)
+
+
+@dataclass
+class Notebook:
+    """The code cells of a notebook, and the text of the file they were read from."""
+
+    text: str
+    cells: list[Cell]
+    # Offset of the start of every line of ``text``. Worked out when first asked for.
+    _line_starts: list[int] = field(default_factory=list)
+
+    def position(self, cell: Cell, offset: int) -> tuple[int, int]:
+        """The 1-based (line, column) in the file of character ``offset`` of a cell."""
+        if not self._line_starts:
+            self._line_starts = [0] + [m.end() for m in re.finditer("\n", self.text)]
+        piece = max(bisect_right(cell.starts, offset) - 1, 0)
+        start, end = cell.spans[piece]
+        body = self.text[start + 1 : end - 1]
+        at = start + 1 + _raw_length(body, offset - cell.starts[piece])
+        line = bisect_right(self._line_starts, at)
+        return line, at - self._line_starts[line - 1] + 1
+
+
+def _raw_length(body: str, count: int) -> int:
+    """How many characters of a JSON string body encode its first ``count`` characters."""
+    if "\\" not in body:
+        return count
+    pos = decoded = 0
+    for m in _ESCAPE.finditer(body):
+        plain = m.start() - pos
+        if decoded + plain >= count:
+            break
+        decoded += plain + 1
+        pos = m.end()
+    return pos + count - decoded
+
+
+def _read_source(reader: _Reader) -> Cell | None:
+    """A cell's ``source``: one string, or a list of strings. None for anything else."""
+    cell = Cell()
+    parts: list[str] = []
+    length = 0
+
+    def add() -> bool:
+        """Read one string and remember where it was."""
+        nonlocal length
+        reader.peek()
+        start = reader.i
+        value = reader.value()
+        if not isinstance(value, str):
+            return False
+        cell.starts.append(length)
+        cell.spans.append((start, reader.i))
+        parts.append(value)
+        length += len(value)
+        return True
+
+    ok = True
+    if reader.peek() == "[":
+        for _ in reader.array_items():
+            ok = add() and ok
+    else:
+        ok = add()
+    cell.text = "".join(parts)
+    return cell if ok and parts else None
+
+
+def _read_cells(reader: _Reader) -> list[Cell]:
+    """The code cells of the ``cells`` array that starts here."""
+    cells: list[Cell] = []
+    for _ in reader.array_items():
+        if reader.peek() != "{":
+            reader.value()
+            continue
+        cell_type: object = None
+        source: Cell | None = None
+        for key in reader.object_keys():
+            if key == "source":
+                source = _read_source(reader)
+            elif key == "cell_type":
+                cell_type = reader.value()
+            else:
+                reader.value()
+        if cell_type == "code" and source is not None:
+            cells.append(source)
+    return cells
+
+
+def _is_python(info: dict[str, object]) -> bool:
+    """Whether the top-level values of a notebook say it is a Python notebook this
+    module can read: format 4, and no kernel language other than Python."""
+    if info.get("nbformat") != 4:
+        return False
+    metadata = info.get("metadata")
+    for section, name in (("kernelspec", "language"), ("language_info", "name")):
+        entry = metadata.get(section) if isinstance(metadata, dict) else None
+        language = entry.get(name) if isinstance(entry, dict) else None
+        if isinstance(language, str) and language.lower() != "python":
+            return False
+    return True
+
+
+def read_notebook(text: str) -> Notebook | None:
+    """The code cells of a Python notebook (nbformat 4), or None if it isn't one.
+
+    Never raises: invalid JSON, another notebook format or another kernel
+    language all give None. Of a key that is there twice, the last one counts, as
+    it does for every JSON reader.
+    """
+    reader = _Reader(text)
+    cells: list[Cell] = []
+    info: dict[str, object] = {}
+    try:
+        for key in reader.object_keys():
+            if key == "cells" and reader.peek() == "[":
+                cells = _read_cells(reader)
+            else:
+                info[key] = reader.value()
+        if reader.peek():
+            return None  # text after the document
+    except (ValueError, RecursionError):
+        return None
+    return Notebook(text, cells) if _is_python(info) else None
+
+
+# --- Cells as Python ---------------------------------------------------------------
+
+_SHELL_CELL = re.compile(r"\s*%%(?:bash|sh|shell)\b")
+_AUTOMAGIC = re.compile(r"pip\s+install\b")
+# Cell magics whose body is still Python.
+_PYTHON_CELL_MAGICS = {"time", "timeit", "capture", "prun", "debug", "python", "python3"}
+_CELL_MAGIC = re.compile(r"\s*%%(\w*)")
+_ASSIGNED_COMMAND = re.compile(r"\s*[A-Za-z_][\w.,\s\[\]]*=\s*[!%]")
+# Expressions that hold string text over several lines (t-strings since Python 3.14).
+_STRINGS = tuple(
+    kind
+    for kind in (ast.Constant, ast.JoinedStr, getattr(ast, "TemplateStr", None))
+    if kind is not None
+)
+
+
+@dataclass
+class CellView:
+    """What one cell contains, by offset into the cell's text."""
+
+    # (command start offset, 0-based line index) of each IPython or shell line.
+    commands: list[tuple[int, int]] = field(default_factory=list)
+    # Imports as (top-level module, line number in the cell, 0-based character column).
+    imports: list[tuple[str, int, int]] = field(default_factory=list)
+    # The lines of the cell (1-based) with an ignore comment that covers SLOP001.
+    ignored: set[int] = field(default_factory=set)
+    ignore_file: bool = False
+
+
+def _is_magic_line(stripped: str) -> bool:
+    """Whether a line is IPython syntax rather than Python."""
+    return (
+        stripped.startswith(("%", "!", "?"))
+        or stripped.endswith("?")
+        or bool(_AUTOMAGIC.match(stripped))
+        or bool(_ASSIGNED_COMMAND.match(stripped))
+    )
+
+
+def _parse_cell(text: str) -> SourceFile | None:
+    """A cell parsed as Python, or None if it is not Python. Never an error."""
+    try:
+        return parse(text, Path("<cell>"), "<cell>")
+    # Too deeply nested for the parser, or text that the parser takes and the
+    # tokenizer doesn't: skipped like any other cell that is not Python.
+    except (RecursionError, MemoryError, SyntaxError):
+        return None
+
+
+def _without_magics(lines: list[str], skip_first: bool) -> tuple[list[str], list[tuple[int, int]]]:
+    """A cell's lines with every IPython line replaced by ``pass``, and the command
+    lines among them as (command start offset, 0-based line index).
+
+    A command line starts with ``!`` or ``%``, or is a bare ``pip install``. The
+    replaced lines keep their indentation, so the result parses where the cell was
+    Python around its magics. ``skip_first`` blanks the first line: a cell magic.
+    """
+    python = list(lines)
+    commands: list[tuple[int, int]] = []
+    continued = False
+    offset = 0
+    for n, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if n == 0 and skip_first:
+            python[n] = ""
+        elif continued or _is_magic_line(stripped):
+            if not continued and (stripped.startswith(("!", "%")) or _AUTOMAGIC.match(stripped)):
+                marker = len(stripped) - len(stripped.lstrip("!%"))
+                commands.append((offset + indent + marker, n))
+            python[n] = line[:indent] + "pass"
+            # A line that ends with a backslash goes on in the next one.
+            continued = stripped.endswith("\\")
+        else:
+            continued = False
+        offset += len(line) + 1
+    return python, commands
+
+
+def view_cell(text: str, want_imports: bool) -> CellView:
+    """Find the command lines of a cell and, if it parses as Python, its imports
+    and ignore comments. A cell that doesn't parse is not an error."""
+    view = CellView()
+    lines = text.split("\n")
+    magic = _CELL_MAGIC.match(lines[0])
+    if magic and _SHELL_CELL.match(lines[0]):
+        # Every line of a %%bash cell is a shell command.
+        offset = 0
+        for n, line in enumerate(lines):
+            if n and line.strip():
+                view.commands.append((offset + len(line) - len(line.lstrip()), n))
+            offset += len(line) + 1
+        return view
+    if magic and magic.group(1) not in _PYTHON_CELL_MAGICS:
+        return view  # %%html, %%writefile, %%sql...: not Python, not shell
+
+    python, commands = _without_magics(lines, skip_first=bool(magic))
+    # A cell that is Python as it stands has no commands: a "!pip" line in valid
+    # Python can only be inside a string.
+    src = _parse_cell(text)
+    if src is None:
+        src = _parse_cell("\n".join(python))
+        if src is None:
+            view.commands = commands
+            return view
+        in_strings = {
+            line
+            for node in src.nodes
+            if isinstance(node, _STRINGS)
+            for line in range(node.lineno, node.end_lineno or node.lineno)
+        }
+        view.commands = [(offset, n) for offset, n in commands if n not in in_strings]
+    view.ignore_file = src.ignore_file
+    view.ignored = {c.line for c in src.comments if suppresses_slop001(c.text)}
+    if want_imports:
+        for name, lineno, byte_col in top_level_imports(src):
+            line = lines[lineno - 1] if lineno <= len(lines) else ""
+            # ast columns are UTF-8 byte offsets; convert to characters.
+            col = len(line.encode()[: byte_col - 1].decode("utf-8", "replace"))
+            view.imports.append((name, lineno, col))
+    return view
+
+
+# --- What the engine uses ----------------------------------------------------------
+
+# Text that says where packages come from, outside a ``pip install`` command that was
+# read: "pip config set global.index-url ...", PIP_EXTRA_INDEX_URL, UV_INDEX, a
+# pip.conf that the notebook writes, a login to a company's package store.
+_INDEX_SETTING = re.compile(
+    r"index[-_]url|uv_(?:default_)?index|find[-_]links|pip\s+config|pip\.conf|pip\.ini"
+    r"|codeartifact|artifactregistry|keyring",
+    re.I,
+)
+
+
+def _offset(lines: list[str], lineno: int, col: int) -> int:
+    """Offset in a cell's text of a 1-based line and 0-based character column."""
+    return sum(len(line) + 1 for line in lines[: lineno - 1]) + col
+
+
+def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool, tuple[int, int]]]:
+    """Every ``pip install`` command of a cell that could be read.
+
+    Yields what the command says, whether an ignore comment covers it, and the part
+    of the cell's text its arguments take up. The comment may be at the end of the
+    line or on a comment-only line right above it: on Windows a shell line passes
+    ``# ...`` on to pip, so there the comment can't share the line.
+    """
+    lines = cell.text.split("\n")
+    for offset, n in view.commands:
+        if len(lines[n]) > MAX_COMMAND_LENGTH:
+            continue
+        above = lines[n - 1].strip() if n else ""
+        ignored = suppresses_slop001(requirements_comment(lines[n])) or (
+            above.startswith("#") and suppresses_slop001(above)
+        )
+        for words in shell_commands(cell.text, offset)[0]:
+            arguments = pip_install_arguments(words)
+            install = pip_requirements(arguments) if arguments else None
+            if install is not None:
+                yield install, ignored, (arguments[0].start, arguments[-1].end)
+
+
+def _mentions_an_index(text: str, understood: list[tuple[int, int]]) -> bool:
+    """Whether a cell's text names a package index anywhere but in the parts that
+    were read as ``pip install`` commands (``understood``)."""
+    return any(
+        not any(start <= m.start() < end for start, end in understood)
+        for m in _INDEX_SETTING.finditer(text)
+    )
+
+
+def scan_notebook(text: str, rel: str, want_imports: bool = False) -> DependencyFile:
+    """What a notebook declares: the packages of its ``pip install`` lines and, with
+    ``want_imports``, the imports of its code cells.
+
+    The notebook's packages are private, all of them, when one of its commands
+    names another source than PyPI, or when a cell sets an index in a way that
+    can't be followed (``pip config``, an environment variable, a ``pip.conf``).
+    Then no import is returned either.
+    """
+    found = DependencyFile(rel, Kind.NOTEBOOK)
+    notebook = read_notebook(text)
+    if notebook is None:
+        return found
+    links = ignore_file = False
+    for cell in notebook.cells:
+        understood: list[tuple[int, int]] = []
+        # Without a pip line or an ignore comment, the cell needn't be parsed.
+        if want_imports or "pip" in cell.text or "slopfence" in cell.text:
+            view = view_cell(cell.text, want_imports)
+            ignore_file = ignore_file or view.ignore_file
+            for install, ignored, span in _installs(cell, view):
+                understood.append(span)
+                found.private_index = found.private_index or install.private_index
+                links = links or install.links
+                for name, word, public in install.packages:
+                    at = cell.text.find(name, word.start)
+                    line, col = notebook.position(cell, at if at != -1 else word.start)
+                    found.dependencies.append(
+                        Dependency(name, rel, line, validate=public, suppressed=ignored, col=col)
+                    )
+            lines = cell.text.split("\n")
+            for name, lineno, col in view.imports:
+                at = _offset(lines, lineno, col)
+                # Unusual line breaks: never report at a wrong place.
+                if lineno not in view.ignored and cell.text.startswith(("import", "from"), at):
+                    found.imports.append((name, *notebook.position(cell, at)))
+        if _mentions_an_index(cell.text, understood):
+            found.private_index = True
+    private = found.private_index or links
+    for dep in found.dependencies:
+        dep.validate = dep.validate and not private
+        dep.suppressed = dep.suppressed or ignore_file
+    if private or ignore_file:
+        found.imports = []
+    return found

@@ -54,8 +54,9 @@ printf 'requests>=2\nflask-jwt-simple-auth\n' > requirements.txt
 printf '[options]\ninstall_requires =\n    requests\n    flask-jwt-simple-auth\n' > setup.cfg
 printf 'from setuptools import setup\n\nsetup(name="sloppy", install_requires=["flask-jwt-simple-auth"])\n' > setup.py
 printf '[packages]\nrequests = "*"\nflask-jwt-simple-auth = "*"\n' > Pipfile
-mkdir -p requirements
+mkdir -p requirements notebooks
 printf 'requests\nflask-jwt-simple-auth\n' > requirements/dev.in
+printf '%s\n' '{"cells": [{"cell_type": "code", "execution_count": null, "metadata": {}, "outputs": [], "source": ["%pip install requests flask-jwt-simple-auth"]}], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}' > notebooks/demo.ipynb
 # Opt in to import lookups, so the single-file run below really resolves local modules.
 printf '[tool.slopfence]\ncheck-imports = true\n' > pyproject.toml
 git add -A && git commit -qm fixture
@@ -68,10 +69,10 @@ for rule in SLOP001 SLOP010 SLOP020; do
 done
 grep -q "not valid Python" <<<"$out" && fail "fixture files should all parse" "$out"
 pass "--all-files fails and reports SLOP001, SLOP010, SLOP020"
-for file in setup.cfg setup.py Pipfile requirements/dev.in; do
+for file in setup.cfg setup.py Pipfile requirements/dev.in notebooks/demo.ipynb; do
   grep -q "^$file\$" <<<"$out" || fail "--all-files should report the dependency in $file" "$out"
 done
-pass "--all-files reports dependencies in setup.cfg, setup.py, Pipfile and requirements/"
+pass "--all-files reports dependencies in setup.cfg, setup.py, Pipfile, requirements/ and notebooks"
 
 # Only one file passed (what pre-commit does on commit): the project's own
 # module must still resolve, so it must not be reported as a missing package.

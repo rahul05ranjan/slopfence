@@ -4,12 +4,14 @@ Two checks:
 
 * Declared dependencies are looked up by their distribution name. This is the
   most reliable signal. They are read from requirements files, pyproject.toml,
-  setup.cfg, setup.py and Pipfile (see ``dependency.kind_of``).
+  setup.cfg, setup.py, Pipfile and ``pip install`` lines in Jupyter notebooks
+  (see ``dependency.kind_of``).
 * Imports in source code are opt-in (``check-imports``), because looking them
   up sends their names to PyPI and can reveal private package names. Even then
   they are only looked up when they are not stdlib, not part of the project,
   not installed, and not provided by a declared or locked distribution
-  (``import yaml`` is provided by ``PyYAML``, see ``import_names``).
+  (``import yaml`` is provided by ``PyYAML``, see ``import_names``). Imports in
+  the code cells of notebooks count too.
 
 Nothing is looked up when the project or the environment may install packages
 from a private index: a name missing from PyPI could then be a private package.
@@ -35,12 +37,14 @@ from slopfence.detectors.dependency import (
     Dependency,
     DependencyFile,
     Kind,
+    egg_name,
     kind_of,
     parse_requirement,
     requirements_comment,
     suppresses_slop001,
 )
 from slopfence.detectors.import_names import IMPORT_NAMES, provides
+from slopfence.detectors.notebooks import MAX_BYTES, scan_notebook
 from slopfence.detectors.setuptools_files import parse_setup_cfg, parse_setup_py
 from slopfence.indexes import is_public_index, pipfile_is_private, uses_private_index
 from slopfence.models import Finding
@@ -55,7 +59,6 @@ else:  # pragma: no cover
 
 
 _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
-_EGG = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)")
 _INDEX_OPTION = re.compile(r"\s*(?:-i|--index-url|--extra-index-url)(?:\s*=\s*|\s+)(\S+)")
 # --find-links and --no-index add a package source too, whatever their value is.
 _LINKS_OPTION = re.compile(r"\s*(?:-f|--find-links|--no-index)(?=[\s=]|$)")
@@ -140,8 +143,8 @@ def build_index(
 
     Every dependency file is read once, and everything SLOP001 knows about it comes
     from that one reading. With ``imports`` False only the dependency check is
-    prepared: the project's modules and the names in lock files are left out, because
-    only the import check asks for them.
+    prepared: the project's modules, the names in lock files and the imports in
+    notebooks are left out, because only the import check asks for them.
     """
     index = ProjectIndex(root=root)
     for path in py_files if imports else ():
@@ -151,7 +154,7 @@ def build_index(
                 break
             index.local_modules.add(parent.name)
     for path in dep_files:
-        index.files.append(parse_dependency_file(path, root))
+        index.files.append(parse_dependency_file(path, root, imports))
     for path in lock_files:
         if not imports and path.name not in INDEX_LOCK_FILES:
             continue  # a big lock file is only worth reading for its names
@@ -221,11 +224,20 @@ def toml_comments(text: str) -> list[str]:
     return comments
 
 
-def parse_dependency_file(path: Path, root: Path) -> DependencyFile:
+def _is_too_large(path: Path) -> bool:
+    """Whether a notebook is larger than ``notebooks.MAX_BYTES``, so it is not read."""
+    try:
+        return path.stat().st_size > MAX_BYTES
+    except OSError:
+        return False  # it can't be read at all, which the caller finds out next
+
+
+def parse_dependency_file(path: Path, root: Path, imports: bool = False) -> DependencyFile:
     """What one dependency file of any kind declares. Empty when it can't be read.
 
     ``path`` is a file that ``kind_of`` calls a dependency file. Any other file is
-    read as a requirements file, the one format that has no fixed name.
+    read as a requirements file, the one format that has no fixed name. With
+    ``imports`` the imports in a notebook's code cells are collected too.
     """
     kind = kind_of(path, root) or Kind.REQUIREMENTS
     rel = _rel(path, root)
@@ -233,9 +245,13 @@ def parse_dependency_file(path: Path, root: Path) -> DependencyFile:
         # A Python file: parsed like any other, never executed.
         src = load(path, root)
         return parse_setup_py(src) if src is not None else DependencyFile(rel, kind)
+    if kind is Kind.NOTEBOOK and _is_too_large(path):
+        return DependencyFile(rel, kind, too_large=True)
     text = read_source(path)
     if text is None:
         return DependencyFile(rel, kind)
+    if kind is Kind.NOTEBOOK:
+        return scan_notebook(text, rel, imports)
     if kind is Kind.SETUP_CFG:
         return parse_setup_cfg(text, rel)
     # Directives only count inside real comments, never inside values or URLs.
@@ -288,10 +304,8 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
         if line.startswith(_NOT_A_NAME):
             pip_syntax = True
             # Options and bare URLs/paths: the name is only known from #egg=.
-            if m := _EGG.search(line):
-                deps.append(
-                    Dependency(m.group(1), rel, lineno, validate=False, suppressed=suppressed)
-                )
+            if name := egg_name(line):
+                deps.append(Dependency(name, rel, lineno, validate=False, suppressed=suppressed))
             continue
         spec = _LINE_OPTIONS.sub("", line.rstrip("\\").rstrip())
         parsed = parse_requirement(spec)

@@ -80,9 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-imports",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="also look up unknown imports in source code on PyPI; this sends their names to "
-        "pypi.org (default: off, only dependency files are checked; --no-check-imports "
-        "overrides config)",
+        help="also look up unknown imports in source code and notebooks on PyPI; this sends "
+        "their names to pypi.org (default: off, only dependency files are checked; "
+        "--no-check-imports overrides config)",
     )
     parser.add_argument(
         "--detect-private-index",

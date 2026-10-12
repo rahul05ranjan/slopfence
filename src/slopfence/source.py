@@ -176,6 +176,16 @@ def load(path: Path, root: Path, comments: bool = True) -> SourceFile | None:
     text = read_source(path)
     if text is None:
         return None
+    return parse(text, path, relative_path(path, root), comments)
+
+
+def parse(text: str, path: Path, rel: str, comments: bool = True) -> SourceFile | None:
+    """Parse Python source that is already read. Returns None if it is not valid Python.
+
+    ``path`` and ``rel`` say where the source comes from. It need not be a whole
+    file: the code cell of a notebook is parsed with this too. ``comments`` is as
+    in ``load``.
+    """
     try:
         # Python warns about some valid code (an invalid escape sequence, for one).
         # What happens then depends on the warning filters of the process: under
@@ -187,7 +197,7 @@ def load(path: Path, root: Path, comments: bool = True) -> SourceFile | None:
     except (SyntaxError, ValueError):
         return None
 
-    src = SourceFile(path=path, rel=relative_path(path, root), text=text, tree=tree)
+    src = SourceFile(path=path, rel=rel, text=text, tree=tree)
     if not comments or "#" not in text:
         return src  # nothing to tokenize for
     try:

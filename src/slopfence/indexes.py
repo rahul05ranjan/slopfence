@@ -111,10 +111,14 @@ def pipfile_is_private(data: Mapping) -> bool:
 # --- Configuration outside the project ------------------------------------------
 
 
+def named_index_url(value: str) -> str:
+    """The URL in an index setting that uv lets you write as ``name=url``."""
+    return value.split("=", 1)[1] if "=" in value.split("://")[0] else value
+
+
 def _env_urls(value: str | None) -> list[str]:
-    # uv's UV_INDEX entries may be "name=url".
     """Index URLs in an environment variable (space-separated; uv allows ``name=url``)."""
-    return [v.split("=", 1)[1] if "=" in v.split("://")[0] else v for v in (value or "").split()]
+    return [named_index_url(v) for v in (value or "").split()]
 
 
 def _pip_config_files(environ: Mapping[str, str], home: Path) -> Iterator[Path]:

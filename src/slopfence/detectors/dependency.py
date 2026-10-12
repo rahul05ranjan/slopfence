@@ -28,11 +28,15 @@ class Kind(str, Enum):
     SETUP_CFG = "setup.cfg"
     SETUP_PY = "setup.py"
     PIPFILE = "Pipfile"
+    NOTEBOOK = "notebook"
     REQUIREMENTS = "requirements file"
 
 
 # The kinds that are known by their exact file name, in any folder.
-_KIND_BY_NAME = {kind.value: kind for kind in Kind if kind is not Kind.REQUIREMENTS}
+_KIND_BY_NAME = {
+    kind.value: kind for kind in (Kind.PYPROJECT, Kind.SETUP_CFG, Kind.SETUP_PY, Kind.PIPFILE)
+}
+NOTEBOOK_SUFFIX = ".ipynb"
 
 REQUIREMENTS_SUFFIXES = (".txt", ".in")
 REQUIREMENTS_WORDS = ("requirements", "constraints")
@@ -77,6 +81,8 @@ _REQUIREMENT = re.compile(
 )
 # pip treats "#" as a comment only at line start or after whitespace (URLs contain "#egg=").
 REQ_COMMENT = re.compile(r"(^|\s)#.*$")
+# The name a URL gives its package: "git+https://host/repo.git#egg=name".
+_EGG = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)")
 # A checksum on a line of its own is not a package name.
 _DIGEST = re.compile(r"[0-9a-fA-F]{32,}")
 _LETTER = re.compile(r"[A-Za-z]")
@@ -135,6 +141,11 @@ class DependencyFile:
     # Requirements files only: no line uses pip's own syntax (a version, an extra, a
     # marker, an option). Such a file may be a list for another tool.
     plain_list: bool = False
+    # Notebooks only: (top-level module, line, column) of every import in a code cell.
+    # Empty unless they were asked for.
+    imports: list[tuple[str, int, int]] = field(default_factory=list)
+    # Notebooks only: the file is too large to be read (see ``notebooks.MAX_BYTES``).
+    too_large: bool = False
 
     @property
     def read_by_v02(self) -> bool:
@@ -197,9 +208,14 @@ def is_requirements_file(path: PurePath) -> bool:
     return REQUIREMENTS_DIR in path.parts[:-1]
 
 
+def _kind_by_name(name: str) -> Kind | None:
+    """The kind of a file whose folder doesn't matter: every kind but requirements files."""
+    return Kind.NOTEBOOK if name.endswith(NOTEBOOK_SUFFIX) else _KIND_BY_NAME.get(name)
+
+
 def dependency_kind(path: PurePath) -> Kind | None:
     """Which kind of dependency file a project-relative path is, or None if it is none."""
-    kind = _KIND_BY_NAME.get(path.name)
+    kind = _kind_by_name(path.name)
     if kind is None and is_requirements_file(path):
         return Kind.REQUIREMENTS
     return kind
@@ -216,7 +232,7 @@ def kind_of(path: Path, root: Path) -> Kind | None:
     if not name.endswith(REQUIREMENTS_SUFFIXES):
         # The folder doesn't matter, and most files of a project end up here. So no
         # relative path is worked out: on a big project that would double the walk.
-        return _KIND_BY_NAME.get(name)
+        return _kind_by_name(name)
     try:
         rel = path.relative_to(root)
     except ValueError:
@@ -257,6 +273,12 @@ def parse_requirement(spec: str) -> Requirement | None:
         return None
     rest = m.group("rest")
     return Requirement(name, rest.startswith("@"), not (rest or m.group("extras")))
+
+
+def egg_name(url: str) -> str | None:
+    """The package name in the ``#egg=`` part of a URL, or None if it has none."""
+    m = _EGG.search(url)
+    return m.group(1) if m else None
 
 
 def suppresses_slop001(comment: str) -> bool:
