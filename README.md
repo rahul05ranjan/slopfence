@@ -57,7 +57,7 @@ slopfence --diff main
 | `--select` / `--ignore` | Comma-separated rule IDs to run or skip, e.g. `--ignore SLOP051` |
 | `--exclude` | Comma-separated paths or globs to skip, e.g. `--exclude migrations,*_pb2.py` |
 | `--known-packages` | Comma-separated private package names or globs that `SLOP001` must accept, e.g. `--known-packages corp-*` |
-| `--detect-private-index` / `--no-detect-private-index` | Skip PyPI lookups when pip or uv is set up with a private index (on by default). Turn it off if that index only mirrors PyPI. See [Private package indexes](#private-package-indexes) |
+| `--detect-private-index` / `--no-detect-private-index` | Skip PyPI lookups when pip or uv is set up with a private index (on by default). Turn it off if that index only mirrors PyPI. Then a private index in a project file also covers only that file. See [Private package indexes](#private-package-indexes) |
 | `--fail-on high\|medium\|low` | Lowest severity that fails the run (default `low`: any issue). All issues are still reported |
 | `--baseline FILE` | Hide the findings recorded in `FILE` and report only new ones. See [Baseline: start with the code you have](#baseline-start-with-the-code-you-have) |
 | `--write-baseline FILE` | Record the current findings in `FILE`. They are not reported, and later runs with `--baseline FILE` hide them |
@@ -232,7 +232,7 @@ It also stops lookups for the dependency files that v0.2 did not read: `setup.py
 - An index in an [excluded](#configuration) file doesn't count.
 - `detect-private-index = false` switches this off. A private index then only covers the file that names it.
 
-`--find-links`, `--no-index` and `dependency_links` name no index. They only ever cover their own file.
+`--find-links` and `--no-index` name no index. They only ever cover their own file.
 
 A private index in your **environment** (variables, pip or uv configuration) could serve any package, so `SLOP001` makes **no lookups at all** and the report says so in a note. An index is public only if its host is `pypi.org`, `files.pythonhosted.org` or `pypi.python.org`. TestPyPI (`test.pypi.org`) is another index, so it counts as private. slopfence never prints index URLs, because they can contain credentials.
 

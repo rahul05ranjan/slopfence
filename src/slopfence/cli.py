@@ -90,7 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="skip PyPI lookups when pip or uv is configured with a non-PyPI index "
         "(PIP_INDEX_URL, pip.conf, uv.toml...), since missing packages may be private "
-        "(default: on; --no-detect-private-index if that index only mirrors PyPI)",
+        "(default: on; --no-detect-private-index if that index only mirrors PyPI: a "
+        "private index in a project file then covers that file only)",
     )
     parser.add_argument(
         "--fail-on",
