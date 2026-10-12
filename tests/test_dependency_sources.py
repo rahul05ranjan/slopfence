@@ -1,5 +1,6 @@
 """SLOP001 in setup.cfg, setup.py, Pipfile and more requirements file names (#53)."""
 
+import codecs
 import configparser
 import json
 import random
@@ -1107,6 +1108,47 @@ def test_a_dependency_file_that_cannot_be_read_declares_nothing(tmp_path, check)
         assert parse_dependency_file(tmp_path / name, tmp_path).dependencies == []
     registry = FakeRegistry(set())
     assert check("SLOP001", registry=registry).findings == [] and registry.queries == []
+
+
+INDEX_AND_NAME = f"--extra-index-url {PRIVATE}\ncorp-auth==1.4\n"
+NOT_UTF8 = {
+    "Latin-1": "# Abh\u00e4ngigkeiten f\u00fcr den Dienst\n".encode("latin-1")
+    + INDEX_AND_NAME.encode(),
+    "UTF-16": codecs.BOM_UTF16_LE + INDEX_AND_NAME.encode("utf-16-le"),
+    "UTF-16 big-endian": codecs.BOM_UTF16_BE + INDEX_AND_NAME.encode("utf-16-be"),
+    "UTF-32": codecs.BOM_UTF32_LE + INDEX_AND_NAME.encode("utf-32-le"),
+    # Python takes the word after "coding:" for the name of an encoding.
+    "coding": b"# no hard-coding: pin versions in constraints\n" + INDEX_AND_NAME.encode(),
+}
+
+
+@pytest.mark.parametrize("encoding", sorted(NOT_UTF8))
+def test_an_index_in_a_requirements_file_that_is_not_utf8_still_counts(tmp_path, check, encoding):
+    """pip reads a requirements file in the locale's encoding, and in UTF-16 with a
+    byte order mark (what ``>`` writes in Windows PowerShell). slopfence reads no
+    package from such a file, as before. Its index is still seen, so the files that
+    inherit from it keep their names on the machine."""
+    (tmp_path / "requirements.txt").write_bytes(NOT_UTF8[encoding])
+    cfg = "[options]\ninstall_requires =\n    corp-auth\n"
+    (tmp_path / "setup.cfg").write_text(cfg, encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert result.findings == [] and registry.queries == []
+    assert "a private package index is set in requirements.txt" in result.notes[0]
+    assert "secret" not in result.notes[0]
+
+
+def test_a_requirements_file_that_is_not_utf8_and_names_no_index_changes_nothing(tmp_path, check):
+    """Without an index option, such a file says nothing about the other files."""
+    (tmp_path / "requirements.txt").write_bytes(
+        "# f\u00fcr pip\ncorp-auth==1.4\n".encode("latin-1")
+    )
+    cfg = "[options]\ninstall_requires =\n    ghost-lib\n"
+    (tmp_path / "setup.cfg").write_text(cfg, encoding="utf-8")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry)
+    assert found(result) == [("setup.cfg", 3, 1)] and result.notes == []
+    assert registry.queries == ["ghost-lib"]
 
 
 def test_pipfile_entries_that_are_not_understood_stay_declared(write, check, not_installed):
