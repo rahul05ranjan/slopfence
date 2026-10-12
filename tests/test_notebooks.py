@@ -5,13 +5,14 @@ import json
 
 import pytest
 
+from slopfence import diff as diffmod
 from slopfence.cli import main
 from slopfence.detectors import notebooks, packages
 from slopfence.detectors.notebooks import read_notebook, scan_notebook
 from slopfence.detectors.pip_commands import pip_install_arguments, pip_requirements, shell_commands
 from slopfence.engine import discover_all, run
 from slopfence.registry import OfflineRegistry, PyPIRegistry
-from tests.conftest import FakeRegistry
+from tests.conftest import FakeRegistry, git, git_init
 
 PRIVATE = "https://user:secret@pkgs.corp.example/simple"
 
@@ -853,3 +854,24 @@ def test_diff_keeps_the_changed_lines_of_a_notebook(write, check):
     line = max(n for n, row in enumerate(text.split("\n"), 1) if "ghost-new" in row)
     result = check("SLOP001", registry=FakeRegistry(set()), changed={"nb.ipynb": {line}})
     assert subjects(result) == ["ghost-new"]
+
+
+def test_diff_counts_the_lines_of_the_file_under_a_textconv_driver(tmp_path):
+    """nbdime and nbstripout give notebooks a ``textconv`` diff driver, and ``git diff``
+    then counts the lines of the converted text. A finding has the line of the file,
+    so the changed lines are taken without the conversion."""
+    git_init(tmp_path)
+    (tmp_path / ".gitattributes").write_text("*.ipynb diff=ipynb\n", encoding="utf-8")
+    # A conversion that turns every notebook into one line: the name of the file.
+    git(tmp_path, "config", "diff.ipynb.textconv", "echo")
+    path = tmp_path / "nb.ipynb"
+    path.write_text(jupyter(["%pip install requests\n"]), encoding="utf-8")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-q", "-m", "a notebook")
+    text = jupyter(["%pip install requests\n", "%pip install ghost-new\n"])
+    path.write_text(text, encoding="utf-8")
+    line = max(n for n, row in enumerate(text.split("\n"), 1) if "ghost-new" in row)
+    changed = diffmod.changed_lines(tmp_path, "main")
+    assert line in changed["nb.ipynb"]
+    result = run([tmp_path], tmp_path, FakeRegistry({"requests"}), changed=changed)
+    assert found(result) == [("nb.ipynb", line, text.split("\n")[line - 1].index("ghost-new") + 1)]

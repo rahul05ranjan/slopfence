@@ -193,7 +193,7 @@ Some names are read and never looked up:
 
 Known limit: a list for another tool whose names mostly exist on PyPI too (`git`, `docker`) is read as a pip file. Add such a file to `exclude`. The same goes for any file you don't want read: `exclude = ["setup.py"]`.
 
-**Notebooks.** A finding has the line and column of the `.ipynb` file itself, the lines that `git diff` shows. So `--diff` and SARIF work. A notebook saved on one line has all its findings on line 1, at different columns. Some details:
+**Notebooks.** A finding has the line and column of the `.ipynb` file itself, the lines that `git diff` shows. So `--diff` and SARIF work. A notebook saved on one line has all its findings on line 1, at different columns. One limit: when a git clean filter strips the outputs of a notebook on commit (tools like `nbstripout` can set one up), `git diff` counts the lines of the stripped text. `--diff` can then miss a finding in a notebook that still has its outputs in your working copy. Clear the outputs, or run without `--diff`. Some details:
 
 - Only `SLOP001` reads notebooks, and only their code cells.
 - A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. An index or links option in it still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`, `%PKG%`), none of its names is looked up.
