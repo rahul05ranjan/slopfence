@@ -18,7 +18,7 @@ from slopfence.listing import PackageInfo
 from slopfence.models import RULES, Severity
 from slopfence.registry import Lookup, OfflineRegistry, PyPIRegistry, normalize
 from tests.conftest import DAY, NOW, FakeFactsRegistry, FakeRegistry, rule_lines, uploaded
-from tests.test_notebooks import jupyter
+from tests.test_notebooks import jupyter, notebook
 
 CHECK = "check its PyPI page and make sure it is the package you mean (slopsquatting risk)"
 
@@ -514,6 +514,55 @@ def test_ignore_comments_on_notebook_imports(write, check):
     asked = set(registry.queries)
     assert {"newlib_a", "newlib_b", "ghost_e_zz"} <= asked
     assert not {"newlib_c", "newlib_d", "newlib-c", "newlib-d"} & asked
+
+
+def one_line(cells):
+    """A notebook saved without line breaks: the whole file is line 1."""
+    return json.dumps(notebook(cells))
+
+
+def one_string(cell):
+    """A notebook whose code cell keeps its source as one string, so on one line."""
+    doc = notebook([cell])
+    doc["cells"][1]["source"] = cell
+    return json.dumps(doc, indent=1)
+
+
+@pytest.mark.parametrize("saved", [one_line, one_string], ids=["one line", "one string"])
+@pytest.mark.parametrize("check_imports", [False, True])
+def test_ignore_comment_on_a_notebook_import_covers_that_import_only(
+    write, check, not_installed, saved, check_imports
+):
+    """A cell, or a whole notebook, can be one line of the file. A comment on one import
+    then says nothing about the ``pip install`` line or the other imports on that line,
+    and switching --check-imports on never takes a dependency finding away."""
+    cell = (
+        "%pip install held-lib brand-new-lib\n"
+        "import newlib_a  # slopfence: ignore[SLOP002]\n"
+        "import newlib_b\n"
+    )
+    write("demo.ipynb", saved([cell] if saved is one_line else cell))
+    facts = new("brand-new-lib", "newlib-a", "newlib-b")
+    facts["held-lib"] = uploaded(3, status="quarantined")
+    registry = FakeFactsRegistry(set(), facts)
+    result = check(registry=registry, check_imports=check_imports, now=NOW)
+    expected = ["held-lib quarantined", "brand-new-lib"]
+    assert [(f.rule, f.subject) for f in result.findings] == [
+        ("SLOP002", subject) for subject in (*expected, *(["newlib_b"] if check_imports else []))
+    ]
+    assert len({f.line for f in result.findings}) == 1  # all on one line of the file
+
+
+def test_ignored_notebook_import_is_not_looked_up_when_only_slop002_runs(
+    write, check, not_installed
+):
+    """Nothing could report the answer. The other imports on the line are still asked about."""
+    cell = "import newlib_a  # slopfence: ignore[SLOP002]\nimport newlib_b\n"
+    write("demo.ipynb", one_line([cell]))
+    registry = pypi("newlib-a", "newlib-b")
+    result = check("SLOP002", registry=registry, check_imports=True, now=NOW)
+    assert [f.subject for f in result.findings] == ["newlib_b"]
+    assert set(registry.queries) == {"newlib-b", "newlib_b"}
 
 
 def test_ignore_file_covers_slop002(write, check):

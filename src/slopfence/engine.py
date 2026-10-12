@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Protocol
 
 from slopfence import baseline as baselinemod
 from slopfence import diff as diffmod
-from slopfence.analysis import Options, Task, analyze_files
+from slopfence.analysis import FileSummary, Options, Task, analyze_files
 from slopfence.config import ignored_rules, is_excluded, selected_rules, slop002_has_no_lookups
 from slopfence.detectors import FILE_DETECTORS
-from slopfence.detectors.dependency import NOTEBOOK_SUFFIX, DependencyFile, Kind, kind_of
+from slopfence.detectors.dependency import NOTEBOOK_SUFFIX, Kind, kind_of
 from slopfence.detectors.duplicates import check_duplicates
 from slopfence.detectors.notebooks import MAX_BYTES as MAX_NOTEBOOK_BYTES
 from slopfence.detectors.packages import (
@@ -153,15 +152,6 @@ SLOP002_NEEDS_SLOP001 = (
 )
 
 
-class _CheckedFile(Protocol):
-    """A file that was checked: where it is, and what its ignore comments cover."""
-
-    rel: str
-
-    def is_ignored(self, rule: str, line: int) -> bool:
-        """Whether an ignore comment in the file covers ``rule`` on ``line``."""
-
-
 def _listed(files: Sequence[str]) -> str:
     """File names for a note: the first few, then how many more there are."""
     shown = ", ".join(files[:NOTE_FILE_LIMIT])
@@ -207,10 +197,23 @@ def _on_changed_lines(findings: list[Finding], changed: diffmod.ChangedLines) ->
     return [f for f in findings if diffmod.touches(changed, f.path, f.line, f.end_line)]
 
 
+def _not_ignored(
+    findings: Iterable[Finding], ignores: Mapping[tuple[int, int], Collection[str]]
+) -> Iterator[Finding]:
+    """The findings about the imports of a notebook that no ignore comment covers.
+
+    ``ignores`` maps the (line, column) of an import to the rules its comment switches
+    off (``DependencyFile.import_ignores``). The ignore comments of a source file
+    are applied by line, in ``_finish``. That won't do for a notebook: one line of
+    the file can hold a whole cell, with a ``pip install`` line and many imports.
+    """
+    return (f for f in findings if f.rule not in ignores.get((f.line, f.col), ()))
+
+
 def _finish(
     result: Result,
     findings: Iterable[Finding],
-    sources: Iterable[_CheckedFile],
+    sources: Iterable[FileSummary],
     switched_off: Callable[[str, str], bool],
     *,
     severity: Mapping[str, Severity],
@@ -355,9 +358,6 @@ def run(
     result.files_checked = len(sources) + sum(p.suffix != ".py" for p in dep_files)
 
     findings = [f for s in sources for f in s.findings]
-    # The notebooks whose imports are checked. Their ignore comments count like those
-    # of a source file.
-    notebooks: list[DependencyFile] = []
 
     if package_rules:
         to_read = _dependency_files_to_read(project[1], dep_files, root, exclude, check_imports)
@@ -388,27 +388,35 @@ def run(
             if may_look_up(partial(switched_off, rel=(rel := _rel_to(p, root))), package_rules)
             and (changed is None or rel in changed)
         }
-        # The imports in the code cells of checked notebooks count too. Only notebooks:
-        # a setup.py is a dependency file as well, but its imports are those of a
-        # source file.
-        if check_imports:
-            notebooks = [
-                f for f in index.files if f.kind is Kind.NOTEBOOK and f.rel in checked_deps
-            ]
         # Imports are only sent to PyPI when the user opts in (they can reveal private
         # names), and never for files outside the diff. Nor is an import under an ignore
         # comment: its finding would be dropped, so there is nothing to ask for.
         imports = {
-            file.rel: [
+            s.rel: [
                 found
-                for found in file.imports
-                if may_look_up(partial(file.is_ignored, line=found[1]), package_rules)
+                for found in s.imports
+                if may_look_up(partial(s.is_ignored, line=found[1]), package_rules)
             ]
-            for file in (*sources, *notebooks)
+            for s in sources
             if check_imports
-            and (changed is None or file.rel in changed)
-            and may_look_up(partial(switched_off, rel=file.rel), package_rules)
+            and (changed is None or s.rel in changed)
+            and may_look_up(partial(switched_off, rel=s.rel), package_rules)
         }
+        # The imports in the code cells of checked notebooks, under the same opt-in.
+        # Only notebooks: a setup.py is a dependency file too, and its imports are
+        # already in the list. Each import of a notebook has ignore comments of its own.
+        import_ignores = {
+            f.rel: f.import_ignores
+            for f in index.files
+            if check_imports and f.kind is Kind.NOTEBOOK and f.rel in checked_deps
+        }
+        for file in index.files:
+            if (off := import_ignores.get(file.rel)) is not None:
+                imports[file.rel] = [
+                    found
+                    for found in file.imports
+                    if may_look_up(off.get(found[1:], frozenset()).__contains__, package_rules)
+                ]
         imported = [name for found in imports.values() for name, _, _ in found]
         # One batch with every name the two checks below will ask about.
         checker.prefetch(checked_deps, imported)
@@ -438,7 +446,8 @@ def run(
                 f"{MAX_NOTEBOOK_BYTES // 2**20} MB is skipped."
             )
         for rel, found in imports.items():
-            findings.extend(checker.check_imports(rel, found))
+            reported = checker.check_imports(rel, found)
+            findings.extend(_not_ignored(reported, import_ignores.get(rel, {})))
         if checker.lookups_unanswered(checked_deps, imported):
             result.unchecked_rules = sorted(package_rules)
     elif (
@@ -466,7 +475,7 @@ def run(
     _finish(
         result,
         findings,
-        (*sources, *notebooks),
+        sources,
         switched_off,
         severity=severity or {},
         baseline=baseline,

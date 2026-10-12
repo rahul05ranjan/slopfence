@@ -161,19 +161,12 @@ class DependencyFile:
     # Empty unless they were asked for. An import under an ignore comment that covers
     # SLOP001 is left out: it is never looked up.
     imports: list[tuple[str, int, int]] = field(default_factory=list)
-    # Notebooks only: the rules that an ignore comment switches off for the imports on
-    # a line of the file. Only lines that have an import in ``imports`` are listed.
-    ignores: dict[int, frozenset[str]] = field(default_factory=dict)
+    # Notebooks only: the rules that an ignore comment switches off for an import, by
+    # the (line, column) of that import. A line of the file can hold a whole cell, or
+    # the whole notebook, so the line alone does not say which import is meant.
+    import_ignores: dict[tuple[int, int], frozenset[str]] = field(default_factory=dict)
     # Notebooks only: the file is too large to be read (see ``notebooks.MAX_BYTES``).
     too_large: bool = False
-
-    def is_ignored(self, rule: str, line: int) -> bool:
-        """Whether an ignore comment covers ``rule`` for the imports on ``line`` (notebooks).
-
-        A notebook that is written as one line of JSON has all its imports on that
-        line. A comment for one of them then covers them all.
-        """
-        return rule in self.ignores.get(line, ())
 
     def make_private(self) -> None:
         """Record that the file's packages may come from another place than PyPI: none

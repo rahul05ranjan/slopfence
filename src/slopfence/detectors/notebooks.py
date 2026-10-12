@@ -488,10 +488,10 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
                 off = view.ignores.get(lineno, frozenset())
                 # Unusual line breaks: never report at a wrong place.
                 if "SLOP001" not in off and cell.text.startswith(("import", "from"), at):
-                    line, column = notebook.position(cell, at)
-                    found.imports.append((name, line, column))
+                    place = notebook.position(cell, at)
+                    found.imports.append((name, *place))
                     if off:
-                        found.ignores[line] = found.ignores.get(line, frozenset()) | off
+                        found.import_ignores[place] = off
         if _mentions_an_index(cell.text, understood):
             found.private_index = True
     private = found.private_index or links
