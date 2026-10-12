@@ -16,6 +16,7 @@ A detector is only useful if people trust it. Before you add or change one:
 - **Messages say what is wrong and what to do**, and name the thing involved: `Function 'x' is identical to 'y' in a.py:3; reuse it instead of keeping two copies`.
 - **Skip code where the pattern is legitimate**, usually tests (`src.is_test_file`) and examples (`src.is_example_file`).
 - **Every `Finding` sets `subject=`:** what the finding is about (a package, function or test name, or the text of the flagged comment). The baseline matches findings on it, so it never holds a line number or another file's location. Changing an existing rule's subject makes every baselined finding of that rule new again.
+- **Never run or import the code you read.** `setup.py` and notebook cells are parsed with `ast` (`source.parse`); a file the parser gives up on is a file with no findings, not a crash.
 - **Don't handle ignore comments, per-file ignores, the baseline or `--diff` in a detector.** The engine filters findings.
 - **Severity:** high for something almost certainly wrong and harmful, medium for a likely problem, low for a deliberate-but-risky habit.
 
