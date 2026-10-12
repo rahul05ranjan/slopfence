@@ -18,9 +18,6 @@ from enum import Enum
 from pathlib import Path, PurePath, PurePosixPath
 from typing import NamedTuple
 
-from slopfence.models import RULES
-from slopfence.source import IGNORE_RE
-
 
 class Kind(str, Enum):
     """The kinds of file that declare dependencies. Each has its own parser."""
@@ -66,8 +63,6 @@ OTHER_PACKAGE_MANAGERS = frozenset(
 # Text files of other tools that a folder named "requirements" may hold.
 NOT_REQUIREMENTS = frozenset({"CMakeLists.txt"})
 _WORDS = re.compile(r"[a-z]+")
-# What an ignore directive that names no rule switches off, and an ``ignore-file`` too.
-ALL_RULES = frozenset(RULES)
 
 _OPERATOR = r"(?:===|==|~=|!=|<=|>=|<|>)"
 # A PEP 508 requirement: a name, optional extras, then nothing, a version specifier
@@ -329,21 +324,6 @@ def egg_name(url: str) -> str | None:
     """The package name in the ``#egg=`` part of a URL, or None if it has none."""
     m = _EGG.search(url)
     return m.group(1) if m else None
-
-
-def line_ignores(comment: str) -> frozenset[str]:
-    """The rules that a ``slopfence: ignore`` directive in a comment switches off.
-
-    The ones it names, or every rule when it names none. Empty when the comment holds
-    no directive. Every dependency parser reads its comments with this.
-    """
-    m = IGNORE_RE.search(comment)
-    if not m:
-        return frozenset()
-    rules = m.group("rules")
-    if rules is None:
-        return ALL_RULES
-    return frozenset(rule.strip().upper() for rule in rules.split(",") if rule.strip())
 
 
 def requirements_comment(line: str) -> str:

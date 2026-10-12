@@ -13,19 +13,24 @@ import re
 from collections.abc import Iterator
 
 from slopfence.detectors.dependency import (
-    ALL_RULES,
     MARKER_NAMES,
     REQ_COMMENT,
     Dependency,
     DependencyFile,
     Kind,
     Requirement,
-    line_ignores,
     parse_requirement,
     requirements_comment,
 )
 from slopfence.indexes import is_public_index
-from slopfence.source import IGNORE_FILE_RE, SourceFile, char_column, walk
+from slopfence.source import (
+    ALL_RULES,
+    IGNORE_FILE_RE,
+    SourceFile,
+    char_column,
+    line_ignores,
+    walk,
+)
 
 # setup() keywords and [options] keys that hold requirement lists.
 REQUIRES_KEYS = ("install_requires", "setup_requires", "tests_require")

@@ -23,11 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
-    ALL_RULES,
     Dependency,
     DependencyFile,
     Kind,
-    line_ignores,
     requirements_comment,
 )
 from slopfence.detectors.pip_commands import (
@@ -37,9 +35,11 @@ from slopfence.detectors.pip_commands import (
     shell_commands,
 )
 from slopfence.source import (
+    ALL_RULES,
     IGNORE_FILE_RE,
     SourceFile,
     char_column,
+    line_ignores,
     parse,
     top_level_imports,
 )

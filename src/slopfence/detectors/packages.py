@@ -38,7 +38,6 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from slopfence.detectors.dependency import (
-    ALL_RULES,
     MARKER_NAMES,
     REQ_COMMENT,
     Dependency,
@@ -47,7 +46,6 @@ from slopfence.detectors.dependency import (
     egg_name,
     is_package_name,
     kind_of,
-    line_ignores,
     lists_other_packages,
     parse_requirement,
     requirements_comment,
@@ -66,7 +64,7 @@ from slopfence.registry import (
     is_pypi_name,
     normalize,
 )
-from slopfence.source import IGNORE_FILE_RE, load, read_source
+from slopfence.source import ALL_RULES, IGNORE_FILE_RE, line_ignores, load, read_source
 from slopfence.source import relative_path as _rel
 
 if sys.version_info >= (3, 11):

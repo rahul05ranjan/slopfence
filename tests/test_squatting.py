@@ -10,13 +10,13 @@ from slopfence import cli
 from slopfence.baseline import Baseline, key_of
 from slopfence.cli import main
 from slopfence.config import ConfigError, load_config, selected_rules, slop002_has_no_lookups
-from slopfence.detectors.dependency import ALL_RULES, line_ignores
 from slopfence.detectors.packages import PACKAGE_RULES, may_look_up
 from slopfence.detectors.squatting import NEW, QUARANTINED, SINGLE_RELEASE, assess
 from slopfence.engine import SLOP002_NEEDS_SLOP001, run
 from slopfence.listing import PackageInfo
 from slopfence.models import RULES, Severity
 from slopfence.registry import Lookup, OfflineRegistry, PyPIRegistry, normalize
+from slopfence.source import ALL_RULES, line_ignores
 from tests.conftest import DAY, NOW, FakeFactsRegistry, FakeRegistry, rule_lines, uploaded
 from tests.test_notebooks import jupyter, notebook
 
@@ -343,13 +343,14 @@ def test_ignore_comments(write, check):
 
 
 def test_line_ignores():
-    """One helper reads the directive for every dependency file format."""
+    """One helper reads the directive in every kind of file, Python source included."""
     assert line_ignores("# pinned for now") == frozenset()
     assert line_ignores("") == frozenset()
     assert line_ignores("# slopfence: ignore") == ALL_RULES == frozenset(RULES)
     assert line_ignores("#slopfence:ignore[slop002 , SLOP010,]") == {"SLOP002", "SLOP010"}
     assert line_ignores("# Slopfence: Ignore[SLOP001]  because it is ours") == {"SLOP001"}
     assert line_ignores("# slopfence: ignore-file") == frozenset()  # another directive
+    assert line_ignores("# slopfence: ignore[ , ]") == frozenset()  # names no rule at all
 
 
 def test_may_look_up():
