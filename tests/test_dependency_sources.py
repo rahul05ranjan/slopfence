@@ -1336,6 +1336,17 @@ def test_a_baseline_hides_findings_of_the_new_sources(tmp_path, monkeypatch, cap
     assert "ghost-new" in report["findings"][0]["message"] and report["baselined"] == 2
 
 
+def test_a_dependency_file_outside_the_project_is_still_checked(write, tmp_path):
+    """``slopfence . ../shared/constraints.txt``: the file is not part of the project,
+    and it is checked because it was named. So it is when single files are named."""
+    own = write("app/requirements.txt", "requests\n")
+    shared = write("shared/constraints.txt", "ghost-pin==1.0\n")
+    for paths in ([tmp_path / "app", shared], [own, shared]):
+        result = run(paths, tmp_path / "app", FakeRegistry({"requests"}))
+        assert [(f.path, f.subject) for f in result.findings] == [(shared.as_posix(), "ghost-pin")]
+        assert result.files_checked == 2
+
+
 def test_sarif_location_of_a_setup_py_finding(tmp_path, monkeypatch, capsys):
     """SARIF carries the real line and column."""
     (tmp_path / "setup.py").write_text(

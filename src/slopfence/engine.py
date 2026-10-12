@@ -301,7 +301,10 @@ def run(
     findings = [f for s in sources for f in s.findings]
 
     if "SLOP001" in rules:
-        index = build_index(root, *project, imports=check_imports)
+        # Every dependency file of the project is read, and the checked ones that are
+        # not part of it (``slopfence . ../shared/constraints.txt``).
+        to_read = sorted({*dep_files, *project[1]})
+        index = build_index(root, project[0], to_read, project[2], imports=check_imports)
         checker = PackageChecker(
             index,
             registry,
