@@ -21,11 +21,12 @@ from slopfence.detectors.packages import (
     LOCK_FILES,
     PACKAGE_RULES,
     PackageChecker,
+    asks_nobody,
     build_index,
     may_look_up,
 )
 from slopfence.models import NEW_PACKAGE_DAYS, RULES, Finding, Severity, plural
-from slopfence.registry import OfflineRegistry, Registry
+from slopfence.registry import Registry
 from slopfence.source import relative_path as _rel_to
 
 EXCLUDED_DIRS = {
@@ -450,12 +451,8 @@ def run(
             findings.extend(_not_ignored(reported, import_ignores.get(rel, {})))
         if checker.lookups_unanswered(checked_deps, imported):
             result.unchecked_rules = sorted(package_rules)
-    elif (
-        slop002_has_no_lookups(select, ignore)
-        # A run that could not look anything up has nothing to say about it.
-        and not private_index
-        and not isinstance(registry, OfflineRegistry)
-    ):
+    # A run that could not look anything up has nothing to say about it.
+    elif slop002_has_no_lookups(select, ignore) and not asks_nobody(registry, private_index):
         result.notes.append(SLOP002_NEEDS_SLOP001)
 
     if "SLOP030" in rules:

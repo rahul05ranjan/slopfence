@@ -118,6 +118,12 @@ _BYTE_ORDER_MARKS = (
 PACKAGE_RULES = frozenset({"SLOP001", "SLOP002"})
 
 
+def asks_nobody(registry: Registry, private_index: str | None) -> bool:
+    """Whether a run can't ask PyPI about anything: it is offline, or the environment
+    configures a private index (``private_index`` says where)."""
+    return bool(private_index) or isinstance(registry, OfflineRegistry)
+
+
 def may_look_up(is_off: Callable[[str], bool], rules: Collection[str]) -> bool:
     """Whether names may be sent to PyPI from a place where some rules are switched off.
 
@@ -791,9 +797,8 @@ class PackageChecker:
 
     @property
     def _asks_nobody(self) -> bool:
-        """Whether this run can't ask PyPI about anything: it is offline, or the
-        environment configures a private index."""
-        return bool(self.private_index) or isinstance(self.registry, OfflineRegistry)
+        """Whether this run can't ask PyPI about anything (see ``asks_nobody``)."""
+        return asks_nobody(self.registry, self.private_index)
 
     def _files(self, only_paths: set[str] | None) -> Iterator[DependencyFile]:
         """The dependency files that are checked: all of them, or the ones in ``only_paths``."""
