@@ -80,13 +80,20 @@ def pip(line):
     ("line", "names"),
     [
         ("pip install requests", ["requests"]),
-        ("pip3 install -q -U 'requests>=2' \"flask[async]==2.*\" ghost_lib", ["requests", "flask", "ghost_lib"]),  # noqa: E501
+        (
+            "pip3 install -q -U 'requests>=2' \"flask[async]==2.*\" ghost_lib",
+            ["requests", "flask", "ghost_lib"],
+        ),
         ("pip3.12 install ghost", ["ghost"]),
         ("python -m pip install --upgrade pip wheel", ["pip", "wheel"]),
         ("{sys.executable} -m pip install numpy", ["numpy"]),
         ("uv pip install --system polars", ["polars"]),
         ("pip install -i https://pypi.org/simple requests", ["requests"]),
-        ("pip install --index-url=https://pypi.org/simple/ --extra-index-url https://pypi.org/simple x", ["x"]),  # noqa: E501
+        (
+            "pip install --index-url=https://pypi.org/simple/"
+            " --extra-index-url https://pypi.org/simple x",
+            ["x"],
+        ),
         ("pip install foo > /dev/null 2>&1", ["foo"]),
         ("pip install transformers>=4.19", ["transformers"]),  # the shell sees a redirection
         ("pip install foo && pip install bar; echo done", ["foo", "bar"]),
@@ -125,13 +132,19 @@ def test_pip_install_lines(line, names):
         ("pip install -ihttps://corp.example/simple corp", (["corp"], [], True, False)),
         ("pip install corp -i", (["corp"], [], True, False)),
         # TestPyPI is another index than PyPI.
-        ("pip install -i https://test.pypi.org/simple/ --no-deps example-pkg", (["example-pkg"], [], True, False)),  # noqa: E501
+        (
+            "pip install -i https://test.pypi.org/simple/ --no-deps example-pkg",
+            (["example-pkg"], [], True, False),
+        ),
         # Links, and no index at all.
         ("pip install torch -f https://corp.example/whl/torch.html", (["torch"], [], False, True)),
         ("pip install --find-links=./wheels torch", (["torch"], [], False, True)),
         ("pip install --no-index corp", (["corp"], [], False, True)),
         # A variable may hold anything, an index option too: nothing is looked up.
-        ("pip install $PACKAGE {pkg} foo=={version} bar==$VER `cmd`", ([], ["foo", "bar"], False, False)),  # noqa: E501
+        (
+            "pip install $PACKAGE {pkg} foo=={version} bar==$VER `cmd`",
+            ([], ["foo", "bar"], False, False),
+        ),
         ("pip install $OPTS corp-auth", ([], ["corp-auth"], False, False)),
         ("pip install %PIP_OPTS% corp-auth", ([], ["corp-auth"], False, False)),  # Windows
         ("pip install corp-auth --index-url $index", ([], ["corp-auth"], True, False)),
@@ -363,13 +376,19 @@ def test_an_index_in_a_notebook_stops_import_lookups_everywhere(write, check, no
     [
         ["!pip config set global.index-url https://corp.example/simple", "!pip install corp-auth"],
         ["%env PIP_INDEX_URL=https://corp.example/simple", "%pip install corp-auth"],
-        ["import os\nos.environ['PIP_EXTRA_INDEX_URL'] = 'https://c.example/s'", "!pip install corp-auth"],  # noqa: E501
+        [
+            "import os\nos.environ['PIP_EXTRA_INDEX_URL'] = 'https://c.example/s'",
+            "!pip install corp-auth",
+        ],
         ["!aws codeartifact login --tool pip --domain corp", "%pip install corp-auth"],
         ["!gcloud artifacts print-settings python  # artifactregistry", "%pip install corp-auth"],
         ["!PIP_INDEX_URL=https://corp.example/simple pip install corp-auth"],
         ["%%bash\nOPTS='--index-url https://corp.example/simple'\npip install $OPTS corp-auth"],
         ["index = 'https://corp.example/simple'\n!pip install corp-auth --index-url $index"],
-        ["%%writefile ~/.pip/pip.conf\n[global]\nindex-url = https://corp.example/simple", "!pip install corp-auth"],  # noqa: E501
+        [
+            "%%writefile ~/.pip/pip.conf\n[global]\nindex-url = https://corp.example/simple",
+            "!pip install corp-auth",
+        ],
         ["%%bash\nexport UV_INDEX=https://corp.example/simple\nuv pip install corp-auth"],
         ["%env UV_DEFAULT_INDEX=https://corp.example/simple", "!uv pip install corp-auth"],
         ["import keyring", "%pip install corp-auth"],
