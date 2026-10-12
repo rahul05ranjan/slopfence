@@ -144,6 +144,7 @@ def test_sarif_uri_is_percent_encoded(tmp_path):
 
 
 def test_excluded_directories_are_not_walked(tmp_path):
+    """Virtual environments, node_modules and egg-info folders are never walked."""
     from slopfence.engine import discover_all
 
     (tmp_path / "app.py").write_text("")

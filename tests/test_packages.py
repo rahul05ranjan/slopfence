@@ -23,6 +23,8 @@ def test_requirements_nonexistent_dependency(write, check):
 
 
 def test_pyproject_dependencies(write, check, tmp_path):
+    """PEP 621 dependencies, optional dependencies and dependency groups are read. The
+    project's own name is not one of them."""
     write(
         "pyproject.toml",
         """
@@ -45,6 +47,8 @@ def test_pyproject_dependencies(write, check, tmp_path):
 
 
 def test_poetry_dependencies(tmp_path, write):
+    """Poetry tables are read. ``python`` is not a package, and a path dependency is
+    declared but not looked up."""
     write(
         "pyproject.toml",
         """
@@ -261,6 +265,7 @@ def test_pyproject_line_is_the_dependency_entry(write, check):
 
 
 def test_pyproject_external_sources(tmp_path, write):
+    """A dependency from a URL, git or a named source is declared but not looked up."""
     write(
         "pyproject.toml",
         """

@@ -410,6 +410,7 @@ class _LineFinder:
         )
 
     def suppressed(self, line: int) -> bool:
+        """Whether an ignore comment on a line (1-based) covers SLOP001."""
         return 0 < line <= len(self.comments) and suppresses_slop001(self.comments[line - 1])
 
 
