@@ -71,12 +71,13 @@ _OPERATOR = r"(?:===|==|~=|!=|<=|>=|<|>)"
 # (which may stand in brackets), a marker or a direct reference. Anything else is not
 # a requirement ("https://x/y.whl", "this is prose", "add_test(NAME x)", "2>&1"). A
 # version may start with "$" or "{": pip expands ${VAR}, and templates fill in
-# {{ version }}.
+# {{ version }}. No two parts next to each other can match the same white space: if
+# they could, a line with a long run of spaces would take hours to turn down.
 _REQUIREMENT = re.compile(
     rf"""^\s*
     (?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)
-    \s*(?P<extras>\[[^\]]*\])?
-    \s*(?P<rest>$|[;@].*$|\(?\s*{_OPERATOR}\s*[A-Za-z0-9*${{].*$)""",
+    (?:\s*(?P<extras>\[[^\]]*\]))?
+    \s*(?P<rest>$|[;@].*$|(?:\(\s*)?{_OPERATOR}\s*[A-Za-z0-9*${{].*$)""",
     re.X | re.S,
 )
 # pip treats "#" as a comment only at line start or after whitespace (URLs contain "#egg=").

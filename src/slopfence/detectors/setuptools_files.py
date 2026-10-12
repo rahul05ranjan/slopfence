@@ -31,7 +31,9 @@ EXTRAS_KEY = "extras_require"
 # Links to pages or files where packages may come from instead of PyPI.
 LINKS_KEY = "dependency_links"
 _SECTION = re.compile(r"\[(?P<header>.+)\]")
-_OPTION = re.compile(r"(?P<option>.*?)\s*(?:[=:]\s*(?P<value>.*))?$")
+# The option's name runs up to the first "=" or ":". White space at its end is cut
+# afterwards: a pattern that skipped it would walk a long run of spaces once per space.
+_OPTION = re.compile(r"(?P<option>[^=:]*)(?:[=:]\s*(?P<value>.*))?$")
 
 # --- setup.cfg ----------------------------------------------------------------------
 
@@ -65,6 +67,7 @@ def _cfg_lines(text: str) -> Iterator[tuple[str, str, _ValueLine]]:
             continue
         # The pattern matches any text, so there is always a match.
         option, value = _OPTION.match(stripped).group("option", "value")
+        option = option.rstrip()
         if value and value.strip():
             yield section, option, (lineno, value.strip(), True)
 

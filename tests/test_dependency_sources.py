@@ -3,6 +3,7 @@
 import configparser
 import json
 import random
+import time
 from pathlib import PurePosixPath
 
 import pytest
@@ -242,6 +243,47 @@ def test_requirement_lines_must_be_requirements(tmp_path, write):
         ("from-git", 7, False),
         ("direct", 8, False),
     ]
+
+
+SPACES = " " * 5000
+LONG = [
+    # Not a requirement: every way to cut the line up is tried before it is turned down.
+    ("requirements.txt", f"requests\nflask{SPACES}extra words\n"),
+    ("constraints.txt", f"requests==2.31\nflask{SPACES}> =1\n"),
+    # No per-requirement option after the white space.
+    ("requirements.txt", "requests\nflask" + "\t" * 100_000 + "-x\n"),
+    ("setup.cfg", f"[options]\ninstall_requires =\n    requests\n    flask{SPACES}extra words\n"),
+    # A line of a TOML string that starts like a table header.
+    (
+        "pyproject.toml",
+        '[project]\nname = "demo"\ndependencies = ["requests"]\n'
+        f'description = """\n[{SPACES}x\n"""\n',
+    ),
+    ("Pipfile", f'[packages]\nrequests = "*"\n\n[scripts]\nrun = """\n[[{SPACES}x\n"""\n'),
+]
+
+
+@pytest.mark.parametrize(("name", "text"), LONG, ids=[f"{n} {i}" for i, (n, _) in enumerate(LONG)])
+def test_a_long_run_of_white_space_is_read_in_no_time(tmp_path, name, text):
+    """A line with thousands of spaces is walked once, not once per space. When two
+    parts of a pattern could match the same spaces, a file of a few kilobytes took
+    minutes: this test would then run for as long."""
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    start = time.perf_counter()
+    declared = parse_dependency_file(path, tmp_path).dependencies
+    assert time.perf_counter() - start < 5
+    assert [dep.name for dep in declared] == ["requests"]
+
+
+def test_a_long_setup_cfg_line_is_split_in_no_time():
+    """The option name of a setup.cfg line ends at the first ``=`` or ``:``, however
+    much white space the line holds before it."""
+    line = "install" + " " * 100_000 + "requires = requests"
+    start = time.perf_counter()
+    lines = list(_cfg_lines(f"[options]\n{line}\n"))
+    assert time.perf_counter() - start < 5
+    assert lines == [("options", "install" + " " * 100_000 + "requires", (2, "requests", True))]
 
 
 def test_prose_named_like_requirements_is_skipped(write, check):

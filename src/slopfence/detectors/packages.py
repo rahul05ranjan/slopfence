@@ -62,12 +62,15 @@ _REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 _INDEX_OPTION = re.compile(r"\s*(?:-i|--index-url|--extra-index-url)(?:\s*=\s*|\s+)(\S+)")
 # --find-links and --no-index add a package source too, whatever their value is.
 _LINKS_OPTION = re.compile(r"\s*(?:-f|--find-links|--no-index)(?=[\s=]|$)")
-# Per-requirement options that may follow a requirement on its line (--hash=...).
-_LINE_OPTIONS = re.compile(r"\s+--[A-Za-z].*$")
+# Per-requirement options that may follow a requirement on its line (--hash=...). A
+# match starts where a run of white space starts, so a long run is only walked once.
+_LINE_OPTIONS = re.compile(r"(?<!\s)\s+--[A-Za-z].*$")
 # How a line starts that is an option, a URL or a path, and so names no package.
 _NOT_A_NAME = ("-", "git+", "hg+", "svn+", "bzr+", "http:", "https:", "file:", ".", "/")
 _WORD_START = re.compile(r"[A-Za-z0-9]")
-_TABLE_HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
+# The name starts and ends with something that is not white space, so the white space
+# around it belongs to one part of the pattern only (see ``dependency._REQUIREMENT``).
+_TABLE_HEADER = re.compile(r"^\s*\[\[?\s*([^\]\s](?:[^\]]*[^\]\s])?)\s*\]\]?\s*(#.*)?$")
 
 # A Pipfile declares dependencies itself, so it is a dependency file, not a lock file.
 LOCK_FILES = {"uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock"}
