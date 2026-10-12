@@ -50,6 +50,12 @@ def test_user():
     assert user.name == "x"
 PY
 printf 'requests>=2\nflask-jwt-simple-auth\n' > requirements.txt
+# Other places that declare dependencies (#53). They reuse the two pinned names.
+printf '[options]\ninstall_requires =\n    requests\n    flask-jwt-simple-auth\n' > setup.cfg
+printf 'from setuptools import setup\n\nsetup(name="sloppy", install_requires=["flask-jwt-simple-auth"])\n' > setup.py
+printf '[packages]\nrequests = "*"\nflask-jwt-simple-auth = "*"\n' > Pipfile
+mkdir -p requirements
+printf 'requests\nflask-jwt-simple-auth\n' > requirements/dev.in
 # Opt in to import lookups, so the single-file run below really resolves local modules.
 printf '[tool.slopfence]\ncheck-imports = true\n' > pyproject.toml
 git add -A && git commit -qm fixture
@@ -62,6 +68,10 @@ for rule in SLOP001 SLOP010 SLOP020; do
 done
 grep -q "not valid Python" <<<"$out" && fail "fixture files should all parse" "$out"
 pass "--all-files fails and reports SLOP001, SLOP010, SLOP020"
+for file in setup.cfg setup.py Pipfile requirements/dev.in; do
+  grep -q "^$file\$" <<<"$out" || fail "--all-files should report the dependency in $file" "$out"
+done
+pass "--all-files reports dependencies in setup.cfg, setup.py, Pipfile and requirements/"
 
 # Only one file passed (what pre-commit does on commit): the project's own
 # module must still resolve, so it must not be reported as a missing package.

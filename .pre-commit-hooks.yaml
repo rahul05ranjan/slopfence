@@ -4,5 +4,7 @@
   entry: slopfence
   language: python
   types_or: [python, toml, text]
-  files: (\.py|requirements.*\.txt|pyproject\.toml)$
+  # Every file slopfence reads: Python files and the files that declare dependencies.
+  # A few more match (my-requirements-notes.txt); slopfence leaves those alone.
+  files: '(\.py|(^|/)(pyproject\.toml|setup\.cfg|Pipfile)|(requirements|constraints)[^/]*\.(txt|in)|(^|/)requirements/.*\.(txt|in))$'
   require_serial: true

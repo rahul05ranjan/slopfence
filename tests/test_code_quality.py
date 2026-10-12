@@ -195,4 +195,4 @@ def test_stub_function_skips_pyi_files(tmp_path):
     src = SourceFile(path=path, rel="api.pyi", text=text, tree=ast.parse(text))
     assert list(check_stub_functions(src)) == []
     # Discovery only picks up .py files, so a full run never sees it either.
-    assert discover_all([tmp_path]) == ([], [], [])
+    assert discover_all([tmp_path], tmp_path) == ([], [], [])

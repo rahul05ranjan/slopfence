@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from slopfence import indexes
+from slopfence.detectors import packages
 from slopfence.engine import Result, run
 from slopfence.registry import OfflineRegistry
 
@@ -42,6 +43,14 @@ class FakeBatchRegistry(FakeRegistry):
         self.batches.append(list(names))
 
 
+class DownRegistry:
+    """A registry that can't be reached: it has no answer for any name."""
+
+    def exists(self, name: str) -> bool | None:
+        """Always unknown."""
+        return None
+
+
 INDEX_ENV_VARS = (
     "PIP_INDEX_URL",
     "PIP_EXTRA_INDEX_URL",
@@ -63,6 +72,13 @@ def no_index_config(monkeypatch):
     # Tests that switch config files back on must never see /etc/pip.conf and friends.
     monkeypatch.setattr(indexes, "PIP_SYSTEM_FILES", ())
     monkeypatch.setattr(indexes, "UV_SYSTEM_FILES", ())
+
+
+@pytest.fixture
+def not_installed(monkeypatch):
+    """Pretend nothing is installed, so only declarations can vouch for an import."""
+    monkeypatch.setattr(packages, "_installed_modules", set)
+    monkeypatch.setattr(packages, "_is_installed", lambda name, installed: False)
 
 
 @pytest.fixture

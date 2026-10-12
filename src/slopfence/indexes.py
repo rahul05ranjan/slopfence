@@ -22,7 +22,9 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover
     import tomli as tomllib
 
-PUBLIC_INDEX_HOSTS = ("pypi.org", "pythonhosted.org")
+# PyPI's own hosts: the index, the host its files come from, and its old name. A host
+# is compared whole. test.pypi.org is another index, with other packages.
+PUBLIC_INDEX_HOSTS = frozenset({"pypi.org", "files.pythonhosted.org", "pypi.python.org"})
 
 # The platform whose config locations are searched (tests check the others too).
 PLATFORM = sys.platform
@@ -36,14 +38,14 @@ UV_SYSTEM_FILES: tuple[Path, ...] = (Path("/etc/uv/uv.toml"),)
 
 
 def is_public_index(url: object) -> bool:
-    """Whether an index URL points at PyPI itself (by host, not substring)."""
+    """Whether an index URL points at PyPI itself (by its whole host, not a part of it)."""
     if not isinstance(url, str):
         return False
     try:
         host = (urllib.parse.urlsplit(url.strip()).hostname or "").lower()
     except ValueError:
         return False
-    return any(host == h or host.endswith("." + h) for h in PUBLIC_INDEX_HOSTS)
+    return host in PUBLIC_INDEX_HOSTS
 
 
 def _private(urls: Iterable[object]) -> bool:

@@ -4,7 +4,6 @@ import json
 
 import pytest
 
-from slopfence.detectors import packages
 from slopfence.detectors.import_names import IMPORT_NAMES, provides
 from slopfence.detectors.packages import parse_lock_file
 from tests.conftest import FakeRegistry, rule_lines
@@ -66,13 +65,6 @@ def test_mapping_values_are_normalized():
         assert all(d == normalize(d) for d in dists), module
 
 
-@pytest.fixture
-def not_installed(monkeypatch):
-    """Pretend nothing is installed, so only declarations can vouch for an import."""
-    monkeypatch.setattr(packages, "_installed_modules", set)
-    monkeypatch.setattr(packages, "_is_installed", lambda name, installed: False)
-
-
 def test_declared_but_not_installed_imports_are_not_flagged(write, check, not_installed):
     """No false SLOP001 for declared packages imported under a different name."""
     write(
@@ -105,7 +97,6 @@ LOCKS = {
     "Pipfile.lock": json.dumps(
         {"_meta": {"sources": []}, "default": {"certifi": {}}, "develop": {"pluggy": {}}}
     ),
-    "Pipfile": "[packages]\nurllib3 = '*'\n\n[dev-packages]\niniconfig = '*'\n",
 }
 
 
@@ -119,7 +110,6 @@ def test_lock_files_vouch_for_indirect_imports(write, check, not_installed, lock
         "poetry.lock": "charset_normalizer",
         "pdm.lock": "markdown_it",
         "Pipfile.lock": "certifi",
-        "Pipfile": "urllib3",
     }[lock]
     write("app.py", f"import {module}\nimport ghost_pkg_zz\n")
     registry = FakeRegistry(set())

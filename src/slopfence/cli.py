@@ -321,6 +321,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             per_file_ignores=config.per_file_ignores,
             severity=config.severity,
             baseline=baseline,
+            inherit_index=detect_private_index,
         )
     except KeyboardInterrupt:
         # No report and no cache file: the run did not finish.
