@@ -25,6 +25,21 @@ QUARANTINED = "quarantined"
 STATUSES = frozenset({"active", "archived", "deprecated", QUARANTINED})
 YOUNG_SECONDS = YOUNG_PACKAGE_DAYS * 86400
 
+# What a listing may hold before the JSON parser sees it. The parser builds an object
+# for every list, object and string of a text, and goes one level down the stack for
+# every level of nesting. So a text of 8 MB can cost 200 MB (``{}`` over and over), and
+# one of 10 KB can end Python 3.12 on a thread with a small stack (``[`` over and
+# over). A real listing stays far below these bounds: the longest one that was
+# measured (tf-nightly, 2,272 files in 1.5 MB) has 9,093 lists and objects and 45,621
+# strings, nested 4 deep.
+MAX_CONTAINERS = 100_000
+MAX_STRINGS = 500_000
+MAX_DEPTH = 16
+
+_OPENERS = b"[{"
+# Every byte but the quote and the four brackets.
+_NO_MARKS = bytes(set(range(256)) - set(b'"]}' + _OPENERS))
+
 # An upload time as PEP 700 writes it: UTC, with or without a fraction of a second.
 # ``datetime.fromisoformat`` only takes the "Z" from Python 3.11 on.
 _UPLOAD_TIME = re.compile(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d{1,6})?Z")
@@ -101,17 +116,47 @@ def _unread(number: str) -> None:
     return None
 
 
-def parse_listing(text: bytes | str) -> PackageInfo | None:
+def _is_bounded(text: bytes) -> bool:
+    """Whether a text is safe to hand to the JSON parser: it holds no more lists,
+    objects and strings than ``MAX_CONTAINERS`` and ``MAX_STRINGS``, and nothing is
+    nested more deeply than ``MAX_DEPTH``.
+
+    The counts are right for valid JSON, and for the valid start of any other text,
+    which is as far as the parser reads. Brackets inside strings are not counted.
+    """
+    # Without the escaped backslashes and quotes, every quote left starts or ends a
+    # string. Then only the quotes and the brackets matter.
+    marks = text.replace(b"\\\\", b"").replace(b'\\"', b"").translate(None, _NO_MARKS)
+    if marks.count(b'"') > 2 * MAX_STRINGS:
+        return False
+    # Every second part between two quotes is outside the strings.
+    brackets = b"".join(marks.split(b'"')[::2])
+    if len(brackets) > 2 * MAX_CONTAINERS:
+        return False
+    depth = 0
+    for bracket in brackets:
+        depth += 1 if bracket in _OPENERS else -1
+        if depth > MAX_DEPTH:
+            return False
+    return True
+
+
+def parse_listing(text: bytes) -> PackageInfo | None:
     """The facts in a complete listing. None when there are none to read.
 
-    That is so for anything unexpected: text that is not JSON, JSON of another shape,
-    JSON nested more deeply than Python's parser takes. It is also so for a project
-    without files, which old projects such as PIL are: only a quarantined project
-    gives a fact without a file. None never means that the package is missing.
+    That is so for anything unexpected: text that is not UTF-8 or not JSON, JSON of
+    another shape, JSON with more in it than a listing has (see ``_is_bounded``). It
+    is also so for a project without files, which old projects such as PIL are: only
+    a quarantined project gives a fact without a file. None never means that the
+    package is missing.
     """
+    if not _is_bounded(text):
+        return None
     try:
-        doc = json.loads(text, parse_int=_unread, parse_float=_unread)
-    except (ValueError, RecursionError):
+        # Decoded here: given bytes, the parser would guess the encoding, and read
+        # UTF-16 text as other JSON than the one that was just measured.
+        doc = json.loads(text.decode("utf-8"), parse_int=_unread, parse_float=_unread)
+    except ValueError:  # also what text that is not UTF-8 raises
         return None
     files = doc.get("files") if isinstance(doc, dict) else None
     if not isinstance(files, list) or not all(isinstance(file, dict) for file in files):

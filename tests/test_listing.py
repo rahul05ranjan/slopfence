@@ -4,7 +4,11 @@ import json
 
 import pytest
 
+from slopfence import listing as listing_module
 from slopfence.listing import (
+    MAX_CONTAINERS,
+    MAX_DEPTH,
+    MAX_STRINGS,
     QUARANTINED,
     YOUNG_SECONDS,
     PackageInfo,
@@ -34,7 +38,6 @@ def test_listing_gives_oldest_upload_release_count_and_status():
         "2026-10-03T01:02:11.752910Z", "2026-10-02T16:51:19.026723Z", "2026-10-02T16:51:20Z"
     )
     assert parse_listing(doc) == PackageInfo(1790959879, 3, "active")
-    assert parse_listing(doc.decode()) == PackageInfo(1790959879, 3, "active")
 
 
 def test_listing_without_files_says_nothing_unless_quarantined():
@@ -58,8 +61,6 @@ def test_listing_without_files_says_nothing_unless_quarantined():
         b'{"files": [1, 2, 3]}',
         b'{"files": [{"upload-time": "2026-10-02T16:51:19Z"}, "odd"]}',
         b"\xff\xfe not text at all \x00",
-        pytest.param(b"[" * 100_000, id="nested too deeply"),
-        pytest.param(b'{"files": ' + b"[" * 100_000, id="files nested too deeply"),
     ],
 )
 def test_unexpected_listing_gives_no_facts(text):
@@ -89,23 +90,22 @@ def test_unexpected_listing_gives_no_facts(text):
 def test_a_file_without_a_readable_upload_time_makes_the_age_unknown(time):
     """One file without a time could be the oldest, so no age is given at all."""
     files = [{"upload-time": "2026-10-02T16:51:19Z"}, {"filename": "x", "upload-time": time}]
-    doc = json.dumps({"files": files, "versions": ["1"]})
+    doc = json.dumps({"files": files, "versions": ["1"]}).encode()
     assert parse_listing(doc) == PackageInfo(None, 1, None)
 
 
 def test_release_count_is_zero_when_the_listing_does_not_say():
     """No ``versions`` key, or one of another type: the count is unknown, which is 0."""
     files = [{"upload-time": "2026-10-02T16:51:19Z"}]
-    assert parse_listing(json.dumps({"files": files})).releases == 0
-    assert parse_listing(json.dumps({"files": files, "versions": "many"})).releases == 0
-    assert parse_listing(json.dumps({"files": files, "versions": {"1": 1}})).releases == 0
+    for versions in ({}, {"versions": "many"}, {"versions": {"1": 1}}):
+        assert parse_listing(json.dumps({"files": files, **versions}).encode()).releases == 0
 
 
 @pytest.mark.parametrize("marker", ["quarantined", ["quarantined"], {"status": 5}, {}, None])
 def test_status_of_another_shape_is_no_status(marker):
     """Only ``{"status": "..."}`` is read."""
     doc = {"files": [{"upload-time": "2026-10-02T16:51:19Z"}], "project-status": marker}
-    assert parse_listing(json.dumps(doc)).status is None
+    assert parse_listing(json.dumps(doc).encode()).status is None
 
 
 def test_only_the_statuses_pypi_defines_are_kept():
@@ -123,7 +123,60 @@ def test_numbers_in_a_listing_are_never_converted():
     huge = "9" * 1_000_000
     file = '{"size": HUGE, "ratio": 1.HUGE, "upload-time": "2026-10-02T16:51:19Z"}'
     doc = ('{"files": [' + file + '], "versions": [HUGE]}').replace("HUGE", huge)
-    assert parse_listing(doc) == PackageInfo(1790959879, 1, None)
+    assert parse_listing(doc.encode()) == PackageInfo(1790959879, 1, None)
+
+
+def flood(item, count):
+    """A listing with one real file, and ``count`` times ``item`` in a key of its own."""
+    file = '{"filename": "pkg-1.whl", "upload-time": "2026-10-02T16:51:19Z"}'
+    more = ",".join([item] * count)
+    return f'{{"files": [{file}], "versions": ["1"], "more": [{more}]}}'.encode()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(b"[" * 100_000, id="nested too deeply"),
+        pytest.param(b'{"files": ' + b"[" * 100_000, id="files nested too deeply"),
+        pytest.param(b'{"a":' * 100_000, id="objects nested too deeply"),
+        pytest.param(b"[" * (MAX_DEPTH + 1) + b"]" * (MAX_DEPTH + 1), id="one level too deep"),
+        pytest.param(flood("{}", MAX_CONTAINERS), id="too many objects"),
+        pytest.param(flood("[]", MAX_CONTAINERS), id="too many lists"),
+        pytest.param(flood('"aa"', MAX_STRINGS), id="too many strings"),
+    ],
+)
+def test_a_document_that_is_too_much_for_the_parser_never_reaches_it(monkeypatch, text):
+    """The JSON parser needs memory for every object, list and string (a hundred times
+    the text for ``{}``), and stack for every level (enough to end Python 3.12 on a
+    thread with a small stack). Such a document is turned down before it is parsed."""
+    monkeypatch.setattr(
+        listing_module.json, "loads", lambda *args, **kwargs: pytest.fail("the parser was called")
+    )
+    assert parse_listing(text) is None
+
+
+def test_text_in_another_encoding_is_not_decoded():
+    """PyPI's listings are UTF-8. The JSON parser would work out that a text is UTF-16
+    and decode it, and then read other brackets than the ones that were counted: here
+    100,000 levels that the count takes for the inside of a string."""
+    hidden = '["\\"", ' + "[" * 100_000 + '"'
+    assert parse_listing(hidden.encode("utf-16-le")) is None
+    assert parse_listing(hidden.encode("utf-16")) is None
+    assert parse_listing(listing("2026-10-02T16:51:19Z").decode().encode("utf-16-le")) is None
+    assert parse_listing("\ufeff".encode() + listing("2026-10-02T16:51:19Z")) is None
+
+
+def test_a_listing_within_the_bounds_is_parsed():
+    """The bounds are on what the parser builds, not on what a string holds: brackets
+    and escaped quotes in a file name or a yank reason count for nothing."""
+    assert parse_listing(flood("{}", 1000)) == PackageInfo(1790959879, 1, None)
+    assert parse_listing(flood('"aa"', 1000)) == PackageInfo(1790959879, 1, None)
+    deep = b"[" * (MAX_DEPTH - 2) + b"]" * (MAX_DEPTH - 2)
+    assert parse_listing(flood(deep.decode(), 5)) == PackageInfo(1790959879, 1, None)
+    reason = '[[{{ \\" [ \\\\' * (MAX_CONTAINERS // 2) + "[" * 3 * MAX_CONTAINERS
+    files = [{"filename": "a.whl", "yanked": reason, "upload-time": "2026-10-02T16:51:19Z"}]
+    doc = json.dumps({"files": files, "versions": ["1"], "project-status": {"status": "active"}})
+    assert parse_listing(doc.encode()) == PackageInfo(1790959879, 1, "active")
 
 
 def test_oldest_upload_time_is_found_in_a_listing_that_was_cut_off():
