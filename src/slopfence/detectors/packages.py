@@ -849,12 +849,15 @@ class PackageChecker:
         Nothing is reported for a file that may be a list for another tool (see
         ``DependencyFile.may_be_for_another_tool``) when PyPI has fewer of its names
         than it lacks. A list of apt or R packages looks like that. A pip file with
-        one invented name among real ones does not.
+        one invented name among real ones does not. A name that PyPI gave no answer
+        for may be missing too: it counts as lacking, so that a failed lookup can
+        only make such a file quieter.
         """
         for file, deps in self._lookup_dependencies(only_paths):
             answers = [self._exists(dep.name) for dep in deps]
             missing = [dep for dep, found in zip(deps, answers, strict=True) if found is False]
-            if file.may_be_for_another_tool and len(missing) > answers.count(True):
+            not_found = len(answers) - answers.count(True)
+            if file.may_be_for_another_tool and not_found > answers.count(True):
                 continue
             for dep in missing:
                 yield Finding(

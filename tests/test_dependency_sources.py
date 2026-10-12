@@ -504,6 +504,25 @@ def test_no_answer_never_makes_a_plain_list_a_pip_file(write, check):
     assert check("SLOP001", registry=Half(set())).findings == []
 
 
+def test_a_plain_list_is_not_reported_while_answers_are_missing(write, check):
+    """PyPI answers two names and gives no answer for the rest (a rate limit, a
+    dropped connection). The names it did not answer may all be missing, so the
+    file may still be a list for another tool: nothing is reported. With every
+    answer in, the same file is silent too."""
+
+    class Partial(FakeRegistry):
+        """Knows ``curl``, lacks ``build-essential``, and can't say for any other."""
+
+        def exists(self, name):
+            """An answer for the two names, unknown for the rest."""
+            return super().exists(name) if name in ("curl", "build-essential") else None
+
+    names = "curl\nbuild-essential\nlibxml2-dev\nlibffi-dev\nlibssl-dev\npython3-dev\n"
+    write("requirements/system.txt", names)
+    assert check("SLOP001", registry=Partial({"curl"})).findings == []
+    assert check("SLOP001", registry=FakeRegistry({"curl"})).findings == []
+
+
 # --- setup.cfg --------------------------------------------------------------------------
 
 SETUP_CFG = """
