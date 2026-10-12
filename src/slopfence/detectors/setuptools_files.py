@@ -24,7 +24,7 @@ from slopfence.detectors.dependency import (
     suppresses_slop001,
 )
 from slopfence.indexes import is_public_index
-from slopfence.source import IGNORE_FILE_RE, SourceFile, walk
+from slopfence.source import IGNORE_FILE_RE, SourceFile, char_column, walk
 
 # setup() keywords and [options] keys that hold requirement lists.
 REQUIRES_KEYS = ("install_requires", "setup_requires", "tests_require")
@@ -470,8 +470,7 @@ def _string_lines(literal: ast.Constant, lines: list[str]) -> Iterator[tuple[str
     parts = literal.value.split("\n")
     spans = (literal.end_lineno or literal.lineno) - literal.lineno == len(parts) - 1
     first = lines[literal.lineno - 1] if literal.lineno <= len(lines) else ""
-    # ast columns are UTF-8 byte offsets; convert to characters.
-    col = len(first.encode()[: literal.col_offset].decode("utf-8", "replace")) + 1
+    col = char_column(first, literal.col_offset) + 1
     for n, part in enumerate(parts):
         if n and spans:
             index = literal.lineno - 1 + n

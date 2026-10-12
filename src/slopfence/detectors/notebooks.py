@@ -35,7 +35,13 @@ from slopfence.detectors.pip_commands import (
     pip_requirements,
     shell_commands,
 )
-from slopfence.source import IGNORE_FILE_RE, SourceFile, parse, top_level_imports
+from slopfence.source import (
+    IGNORE_FILE_RE,
+    SourceFile,
+    char_column,
+    parse,
+    top_level_imports,
+)
 
 # A notebook larger than this is not read. The whole file has to be in memory to be
 # decoded, with its images and outputs. Notebooks that people write stay far below it.
@@ -368,9 +374,7 @@ def view_cell(text: str, want_imports: bool) -> CellView:
     if want_imports:
         for name, lineno, byte_col in top_level_imports(src):
             line = lines[lineno - 1] if lineno <= len(lines) else ""
-            # ast columns are UTF-8 byte offsets; convert to characters.
-            col = len(line.encode()[: byte_col - 1].decode("utf-8", "replace"))
-            view.imports.append((name, lineno, col))
+            view.imports.append((name, lineno, char_column(line, byte_col - 1)))
     return view
 
 

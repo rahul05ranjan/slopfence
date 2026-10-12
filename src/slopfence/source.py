@@ -56,6 +56,14 @@ def child_statements(node: ast.AST) -> list[ast.AST]:
     return children(node, _STATEMENT_HOLDERS)
 
 
+def char_column(line: str, byte_offset: int) -> int:
+    """The 0-based character column of a UTF-8 byte offset in ``line``.
+
+    ``ast`` counts columns in bytes. Editors, reports and git count characters.
+    """
+    return len(line.encode()[:byte_offset].decode("utf-8", "replace"))
+
+
 @dataclass
 class TextSpan:
     """A line of comment or docstring text with its location (1-based line and column)."""
@@ -126,8 +134,7 @@ class SourceFile:
                 if not text.strip():
                     continue
                 if lineno == const.lineno:
-                    # ast columns are UTF-8 byte offsets; convert to characters.
-                    col = len(text.encode()[: const.col_offset].decode("utf-8", "replace"))
+                    col = char_column(text, const.col_offset)
                 else:
                     col = len(text) - len(text.lstrip())
                 # Treat escapes like \n as word breaks so "Intro\nI hope this helps" matches.
