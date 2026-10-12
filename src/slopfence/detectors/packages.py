@@ -39,6 +39,7 @@ from slopfence.detectors.dependency import (
     DependencyFile,
     Kind,
     egg_name,
+    is_package_name,
     kind_of,
     lists_other_packages,
     parse_requirement,
@@ -604,7 +605,7 @@ def _parse_pyproject(text: str, rel: str) -> DependencyFile:
                 isinstance(s, dict) and {"path", "git", "url", "source"} & set(s) for s in specs
             )
             line = finder.key(table, name)
-            validate = not (external or private_index)
+            validate = not (external or private_index) and is_package_name(name)
             deps.append(
                 Dependency(name, rel, line, validate, finder.suppressed(line), own_source=external)
             )
@@ -628,7 +629,8 @@ def _parse_pipfile(text: str, rel: str) -> DependencyFile:
     """Dependencies in a Pipfile's ``[packages]`` and ``[dev-packages]`` tables.
 
     An entry that comes from git, a path, a URL or an index that is not one of the
-    file's PyPI sources is declared but not looked up. So is one that isn't understood.
+    file's PyPI sources is declared but not looked up. So is one that isn't
+    understood, and one whose key is not a package name.
     """
     found = DependencyFile(rel, Kind.PIPFILE)
     data = _load_toml(text)
@@ -652,7 +654,7 @@ def _parse_pipfile(text: str, rel: str) -> DependencyFile:
                     name,
                     rel,
                     line,
-                    validate=from_index and not private,
+                    validate=from_index and not private and is_package_name(name),
                     suppressed=finder.suppressed(line),
                     own_source=not from_index,
                 )

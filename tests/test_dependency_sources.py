@@ -1164,6 +1164,28 @@ def test_pipfile_entries_that_are_not_understood_stay_declared(write, check, not
     assert result.findings == [] and registry.queries == []
 
 
+NOT_NAMES = ['"my pkg"', '"foo/bar?x=1#frag"', '"../../simple/internal"', '" padded "', '"a\\tb"']
+NOT_NAMES += ['"requests[security]"', '"corp-auth>=1"', '"vendor.tar.gz"']
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["Pipfile\n[packages]", "pyproject.toml\n[tool.poetry.dependencies]"],
+    ids=["Pipfile", "Poetry"],
+)
+def test_a_table_key_that_is_no_package_name_is_never_sent(write, check, header):
+    """A quoted TOML key can hold anything. Only a package name goes to the registry:
+    a key with a space would end the run, and one with ``/`` or ``?`` would ask PyPI
+    for another address than the one of a package."""
+    name, table = header.split("\n")
+    body = "".join(f'{key} = "*"\n' for key in [*NOT_NAMES, "ghost-lib", '"zope.interface"'])
+    write(name, f"{table}\n{body}")
+    registry = FakeRegistry({"zope.interface"})
+    result = check("SLOP001", registry=registry)
+    assert [f.subject for f in result.findings] == ["ghost-lib"]
+    assert sorted(registry.queries) == ["ghost-lib", "zope.interface"]
+
+
 def test_pipfile_vouches_for_imports(write, check, not_installed):
     """Pipfile packages are declared dependencies: imports of them aren't looked up."""
     write("Pipfile", "[packages]\nurllib3 = '*'\n\n[dev-packages]\niniconfig = '*'\n")

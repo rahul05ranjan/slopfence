@@ -298,6 +298,16 @@ def parse_requirement(spec: str) -> Requirement | None:
     return Requirement(name, rest.startswith("@"), not (rest or m.group("extras")))
 
 
+def is_package_name(text: str) -> bool:
+    """Whether ``text`` is a package name and nothing else.
+
+    A TOML key that names a package must be one. A quoted key can hold anything: a
+    space, a path, a version. Such a key is no name to ask a registry about.
+    """
+    parsed = parse_requirement(text)
+    return parsed is not None and parsed.name == text
+
+
 def egg_name(url: str) -> str | None:
     """The package name in the ``#egg=`` part of a URL, or None if it has none."""
     m = _EGG.search(url)
