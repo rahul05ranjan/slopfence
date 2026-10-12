@@ -644,7 +644,7 @@ def test_batch_stores_facts_like_single_lookups(pypi):
     [
         "not json",
         "[1, 2]",
-        "[" * 100_000,
+        pytest.param("[" * 100_000, id="nested too deeply"),
         '{"pkg": "yes", "_meta": "broken"}',
         '{"pkg": [true, 9e12, "extra"], "_meta": {"pkg": [1, 2]}}',
         '{"pkg": [true, "tomorrow"], "_meta": {"pkg": [5, 1, null, 9e12]}}',

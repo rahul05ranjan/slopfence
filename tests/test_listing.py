@@ -58,8 +58,8 @@ def test_listing_without_files_says_nothing_unless_quarantined():
         b'{"files": [1, 2, 3]}',
         b'{"files": [{"upload-time": "2026-10-02T16:51:19Z"}, "odd"]}',
         b"\xff\xfe not text at all \x00",
-        b"[" * 100_000,
-        b'{"files": ' + b"[" * 100_000,
+        pytest.param(b"[" * 100_000, id="nested too deeply"),
+        pytest.param(b'{"files": ' + b"[" * 100_000, id="files nested too deeply"),
     ],
 )
 def test_unexpected_listing_gives_no_facts(text):
