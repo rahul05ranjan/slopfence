@@ -193,7 +193,7 @@ A requirements file is a `.txt` or `.in` file whose name starts or ends with `re
 
 Some names are read and never looked up:
 
-- **Your own packages.** The `name` in any `pyproject.toml`, `setup.cfg` or `setup.py` of the project is a package of this repository, so a dependency on it is not a hallucination.
+- **Your own packages.** The `name` in any `pyproject.toml`, `setup.cfg` or `setup.py` of the project is a package of this repository, so a dependency on it is not a hallucination. With `--check-imports`, neither is an import of it: a package written in Rust or C has no Python file to find.
 - **Packages from a URL, a path or git.** `corp-auth @ git+https://...` in one file says where `corp-auth` comes from. It is not looked up there, and not in any other file that names it. The same goes for a `[tool.uv.sources]` entry, a Poetry entry with `source`, `git`, `path` or `url`, and a `Pipfile` entry with `git`, `path`, `file`, `url` or an `index` that is not PyPI.
 - **Lines that are not requirements.** `python>=3.9`, a file name (`vendor.tar.gz`), a path, a checksum. A file with more prose than requirements is skipped as a whole.
 

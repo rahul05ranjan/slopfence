@@ -548,6 +548,23 @@ def test_own_packages_are_never_looked_up(write, check):
     assert registry.queries == ["someone-elses-new-tool"]
 
 
+def test_import_of_the_projects_own_package_is_never_looked_up(write, tmp_path, not_installed):
+    """A compiled package (Rust, C) has no Python source in the tree, and pre-commit
+    does not install the project. Importing it is still importing the project."""
+    write("pyproject.toml", '[project]\nname = "My.New_Tool"\nversion = "0.1.1"\n')
+    write("src/lib.rs", "#[pymodule]\nfn my_new_tool() {}\n")
+    test = write("tests/test_api.py", "from my_new_tool import parse\nimport other_new_lib\n")
+    for paths in ([tmp_path], [test]):
+        registry = pypi("my-new-tool", "other-new-lib")
+        result = run(paths, tmp_path, registry, check_imports=True, now=NOW)
+        assert [(f.rule, f.subject) for f in result.findings] == [("SLOP002", "other_new_lib")]
+        assert set(registry.queries) == {"other-new-lib", "other_new_lib"}
+    # Nor is it a hallucination before its first upload.
+    unpublished = FakeRegistry({"other-new-lib"})
+    assert run([tmp_path], tmp_path, unpublished, check_imports=True, now=NOW).findings == []
+    assert set(unpublished.queries) == {"other-new-lib", "other_new_lib"}
+
+
 @pytest.mark.parametrize("select", [None, ["SLOP002"]])
 def test_own_packages_are_known_whichever_files_are_checked(write, tmp_path, select):
     """A workspace: acme-a depends on the new acme-b. pre-commit passes single files."""

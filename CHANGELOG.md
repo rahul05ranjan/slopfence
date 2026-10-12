@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - With `--check-imports`, an import whose name PyPI can't hold as a package name (`import café`, `import _private`) ended the run with a traceback, or was sent to PyPI. Such a name is no longer sent. It is reported like any import that no package provides ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
+- With `--check-imports`, an import of the project's own package was looked up, and reported, when the package has no Python source in the project (a Rust or C extension) and is not installed where slopfence runs. A name that a `pyproject.toml`, `setup.cfg` or `setup.py` of the project gives it is now enough ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
 - An answer to a lookup that is not HTTP at all ended the run with a traceback. It now counts as no answer ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
 - A damaged cache file (an entry that is not `[found, time]`) could end the run with a traceback. Such an entry is now looked up again ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
 - A checkout nested inside the project (a git worktree, clone or submodule, such as Claude Code's `.claude/worktrees/`) no longer counts as project code. Before, `SLOP030` reported every function as a duplicate of its copy, and `SLOP001` treated its modules as the project's own. A nested checkout that you name on the command line is still checked ([#58](https://github.com/syedmuhdahmad/slopfence/issues/58))

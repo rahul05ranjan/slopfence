@@ -740,7 +740,9 @@ class PackageChecker:
         # Names that are never looked up, in whichever file they are declared.
         self._not_from_pypi = index.own_names | index.sourced_names
         self._installed = _installed_modules()
-        self._provided_by = index.declared | index.locked
+        # The distributions an import can come from. One of the project's own counts
+        # too: a compiled package (Rust, C) has no Python source in the tree.
+        self._provided_by = index.declared | index.locked | index.own_names
         # Import name -> whether PyPI has a package for it (None: no answer, or not asked).
         self._on_pypi: dict[str, bool | None] = {}
         # Import name -> the names to ask PyPI about ([] when it needs no lookup).
@@ -926,7 +928,8 @@ class PackageChecker:
 
     def _is_provided(self, name: str) -> bool:
         """Whether the module comes from something the project itself names: a known
-        package, Python, the project's own code, or a declared or locked package."""
+        package, Python, the project's own code or one of its own packages, or a
+        declared or locked package."""
         return (
             self._is_known(name)
             or name in sys.stdlib_module_names
