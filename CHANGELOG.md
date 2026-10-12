@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Requirements files are read more strictly. A line that pip would reject gives no finding, `python>=3.9` is not a package, and neither is a file name such as `vendor.tar.gz`. A document that is only named like a requirements file is skipped ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
-- Requirements files for other package managers (`apt-requirements.txt`, `requirements-conda.txt`) are no longer read ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
+- The packages in a requirements file for another package manager (`requirements-conda.txt`, `requirements.apt.txt`) are no longer checked: they are not PyPI names. A private index that such a file names still counts ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
 - A package that one project file takes from a URL, a path, git or an index it names (`corp-auth @ git+https://...`, a `[tool.uv.sources]` entry, a Poetry `source`) is no longer looked up in the other files that name it. Before, `corp-auth` in `pyproject.toml` was sent to PyPI and reported although `requirements.txt` installed it from git ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
 - `--find-links` and `--no-index` in a requirements file make that file's packages private: a name that PyPI doesn't have may come from the links ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
 - With `--diff`, dependency files outside the diff are no longer looked up on PyPI. Their findings were already left out ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))

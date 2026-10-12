@@ -54,6 +54,9 @@ def brief(path, root):
         # A word that only holds a package manager's name is not that package manager.
         "support-requirements.txt",
         "requirements-snapshot.txt",
+        # A list for another package manager: only its index options are read.
+        "apt-requirements.txt",
+        "requirements/system/ubuntu/apt-packages.txt",
     ],
 )
 def test_requirements_file_names(name):
@@ -74,13 +77,6 @@ def test_requirements_file_names(name):
         "my-requirements-notes.txt",
         "MANIFEST.in",
         "proctoringrequirements/email/body.txt",
-        # Lists for another package manager are not PyPI names.
-        "apt-requirements.txt",
-        "requirements-conda.txt",
-        "requirements/system/ubuntu/apt-packages.txt",
-        "requirements-cran.txt",
-        "choco-requirements.txt",
-        "requirements/snap.txt",
         # A build file of another tool in a folder that happens to be called requirements.
         "tests/requirements/CMakeLists.txt",
         "Pipfile.lock",
@@ -89,8 +85,50 @@ def test_requirements_file_names(name):
     ],
 )
 def test_names_that_are_not_dependency_files(name):
-    """Docs, templates, lock files and other package managers' lists are left alone."""
+    """Docs, templates, lock files and other tools' build files are left alone."""
     assert dependency_kind(PurePosixPath(name)) is None
+
+
+OTHER_MANAGERS = [
+    "apt-requirements.txt",
+    "requirements-conda.txt",
+    "requirements_apt.txt",
+    "requirements/system/ubuntu/apt-packages.txt",
+    "requirements-cran.txt",
+    "choco-requirements.txt",
+    "requirements/snap.txt",
+]
+
+
+@pytest.mark.parametrize("name", OTHER_MANAGERS)
+def test_the_packages_of_a_list_for_another_package_manager_are_not_read(
+    write, check, tmp_path, name
+):
+    """``apt-requirements.txt`` lists apt packages. They are not PyPI names, so none
+    is declared, sent or reported."""
+    path = write(name, "libxml2-dev\nbuild-essential>=12\n")
+    write("constraints.txt", "ghost-pin==1.0\n")
+    assert parse_dependency_file(path, tmp_path).dependencies == []
+    registry = FakeRegistry(set())
+    assert found(check("SLOP001", registry=registry)) == [("constraints.txt", 1, 1)]
+    assert registry.queries == ["ghost-pin"]
+
+
+@pytest.mark.parametrize("name", OTHER_MANAGERS)
+def test_an_index_in_a_list_for_another_package_manager_still_counts(
+    write, check, name, not_installed
+):
+    """A file with an index option is a pip file, whatever its name says. v0.2 read
+    ``requirements-conda.txt`` and kept the project's names on the machine: the files
+    that inherit are not looked up, and neither are imports."""
+    write(name, INDEX + "corp-auth==1.0\n")
+    write("setup.py", "from setuptools import setup\nsetup(install_requires=['corp-core'])\n")
+    write("src/app.py", "import corp_models\n")
+    registry = FakeRegistry(set())
+    result = check("SLOP001", registry=registry, check_imports=True)
+    assert result.findings == [] and registry.queries == []
+    assert f"{name} uses a private package index" in result.notes[0]
+    assert f"a private package index is set in {name}" in result.notes[1]
 
 
 def test_other_kinds():

@@ -42,7 +42,7 @@ REQUIREMENTS_SUFFIXES = (".txt", ".in")
 REQUIREMENTS_WORDS = ("requirements", "constraints")
 REQUIREMENTS_DIR = "requirements"
 # "apt-requirements.txt" and "requirements/conda.txt" list packages for another
-# package manager. Their names are not PyPI names, and nothing in the file tells.
+# package manager (see ``lists_other_packages``).
 OTHER_PACKAGE_MANAGERS = frozenset(
     {
         "apk",
@@ -204,19 +204,31 @@ def is_requirements_file(path: PurePath) -> bool:
     * the file is inside a folder named ``requirements``, at any depth
       (``requirements/base.txt``, ``requirements/testing/all.in``).
 
-    Matching is case-sensitive: ``REQUIREMENTS.txt`` is usually prose. A name that
-    contains another package manager as a word (``apt-requirements.txt``,
-    ``requirements/conda.txt``) never counts, and neither does ``CMakeLists.txt``.
+    Matching is case-sensitive: ``REQUIREMENTS.txt`` is usually prose.
+    ``CMakeLists.txt`` never counts. A file for another package manager
+    (``apt-requirements.txt``) does, but its packages are not read: see
+    ``lists_other_packages``.
     """
     name = path.name
     if not name.endswith(REQUIREMENTS_SUFFIXES) or name in NOT_REQUIREMENTS:
         return False
     stem = name.rsplit(".", 1)[0]
-    if OTHER_PACKAGE_MANAGERS.intersection(_WORDS.findall(stem.lower())):
-        return False
     if stem.startswith(REQUIREMENTS_WORDS) or stem.endswith(REQUIREMENTS_WORDS):
         return True
     return REQUIREMENTS_DIR in path.parts[:-1]
+
+
+def lists_other_packages(path: PurePath) -> bool:
+    """Whether a requirements file's name says its packages are for another package
+    manager: the name holds one as a word (``apt-requirements.txt``,
+    ``requirements/conda.txt``).
+
+    Such names are not PyPI names, and nothing in the file tells them from pip's. So
+    they are never read. An index option in the file is pip's all the same, and it
+    counts like in any other requirements file.
+    """
+    stem = path.name.rsplit(".", 1)[0]
+    return bool(OTHER_PACKAGE_MANAGERS.intersection(_WORDS.findall(stem.lower())))
 
 
 def _kind_by_name(name: str) -> Kind | None:

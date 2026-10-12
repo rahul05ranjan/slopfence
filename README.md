@@ -182,7 +182,7 @@ That is the file, the rule, what the finding is about, and how many there are. "
 | `Pipfile` | `[packages]` and `[dev-packages]` |
 | Notebooks (`.ipynb`) | `pip install` lines in code cells: `%pip install x`, `!pip install x`, `!python -m pip install x`, `!uv pip install x`, and the lines of a `%%bash` cell. With `--check-imports`, also the imports in code cells |
 
-A requirements file is a `.txt` or `.in` file whose name starts or ends with `requirements` or `constraints`: `requirements-dev.txt`, `dev-requirements.txt`, `requirements.in`, `constraints.txt`. Any `.txt` or `.in` file inside a folder named `requirements` is one too: `requirements/base.txt`. A name that mentions another package manager is skipped (`apt-requirements.txt`, `requirements-conda.txt`), and so is `CMakeLists.txt`.
+A requirements file is a `.txt` or `.in` file whose name starts or ends with `requirements` or `constraints`: `requirements-dev.txt`, `dev-requirements.txt`, `requirements.in`, `constraints.txt`. Any `.txt` or `.in` file inside a folder named `requirements` is one too: `requirements/base.txt`. When the name mentions another package manager (`apt-requirements.txt`, `requirements-conda.txt`), the packages in the file are not read: they are not PyPI names. A private index that such a file names still counts. `CMakeLists.txt` is never read.
 
 Some names are read and never looked up:
 

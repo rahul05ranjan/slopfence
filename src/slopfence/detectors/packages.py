@@ -39,6 +39,7 @@ from slopfence.detectors.dependency import (
     Kind,
     egg_name,
     kind_of,
+    lists_other_packages,
     parse_requirement,
     requirements_comment,
     suppresses_slop001,
@@ -354,11 +355,14 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
 
     A line must be a valid requirement. A file with more prose lines than
     requirements is a document that is only named like a requirements file, and
-    yields nothing.
+    yields nothing. Neither does a list for another package manager. The index
+    options of the file count in every case.
     """
     lines = text.splitlines()
     # With another source than PyPI, a name missing from PyPI may be a private package.
     private_index, links = _requirements_sources(lines)
+    if lists_other_packages(PurePosixPath(rel)):
+        return DependencyFile(rel, Kind.REQUIREMENTS, private_index=private_index)
     deps = []
     valid = prose = 0
     # Whether any line uses pip's own syntax: an option, a URL, a version, an extra.
