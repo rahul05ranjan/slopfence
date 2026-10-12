@@ -82,6 +82,22 @@ def project(tmp_path: Path) -> Path:
     return make_repo(tmp_path / "project")
 
 
+@pytest.fixture
+def worktree(project: Path, tmp_path: Path) -> Path:
+    """A second checkout of the project, on the feature branch ``feat/y``."""
+    path = tmp_path / "wt"
+    git(project, "worktree", "add", "-q", "-b", "feat/y", str(path))
+    return path
+
+
+def link_folder(link: Path, target: Path) -> None:
+    """Make ``link`` a symbolic link to the folder ``target``; skip the test where that fails."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic links can't be created here")
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -96,6 +112,8 @@ def project(tmp_path: Path) -> Path:
         "git push origin HEAD:main",
         "git push --force origin +refs/heads/main",
         "git push origin HEAD",
+        "sudo git commit -m x",
+        "env GIT_EDITOR=true git commit",
         "git push -o ci.skip origin",
         "git push -o ci.skip origin main",
     ],
@@ -123,19 +141,245 @@ def test_guard_allows_on_feature_branch(project: Path, command: str) -> None:
     assert bash_decision(command, project) == "allow"
 
 
-@pytest.mark.parametrize("command", ["ls -la", "git status", "echo git commit", "git log main"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls -la",
+        "git status",
+        "echo git commit",
+        "git log main",
+        "# git commit -m x",
+        "echo done # ; git commit -m x",
+    ],
+)
 def test_guard_ignores_other_commands(project: Path, command: str) -> None:
     """Commands that neither commit nor push are never touched."""
     assert bash_decision(command, project) == "allow"
 
 
-def test_guard_follows_the_folder_the_command_runs_in(project: Path, tmp_path: Path) -> None:
+def test_guard_follows_the_folder_the_command_runs_in(project: Path, worktree: Path) -> None:
     """``git -C`` and ``cd`` decide which checkout's branch counts, not the session folder."""
-    worktree = tmp_path / "wt"
-    git(project, "worktree", "add", "-q", "-b", "feat/y", str(worktree))
     assert bash_decision(f"git -C {worktree} commit -m x", project) == "allow"
     assert bash_decision(f"cd {worktree} && git commit -m x", project) == "allow"
     assert bash_decision(f"git -C {project} commit -m x", project, cwd=worktree) == "deny"
+
+
+def test_guard_follows_variables_set_on_the_command_line(project: Path, worktree: Path) -> None:
+    """A folder reached through ``W=...; cd $W`` counts, in both directions."""
+    assert bash_decision(f"W={worktree}; cd $W && git commit -m x", project) == "allow"
+    assert bash_decision(f'export W={worktree} && git -C "${{W}}" commit -m x', project) == "allow"
+    assert bash_decision(f"W={project}; cd $W && git commit -m x", project, cwd=worktree) == "deny"
+    assert bash_decision(f"W={project}\ngit -C $W push", project, cwd=worktree) == "deny"
+
+
+@pytest.mark.parametrize("reference", ["'$W'", "\\$W", "'${W}'"])
+def test_guard_does_not_expand_a_variable_the_shell_takes_as_text(
+    project: Path, worktree: Path, reference: str
+) -> None:
+    """``cd '$W'`` goes to a folder named ``$W``, not to the value of ``W``.
+
+    That folder does not exist, so the shell stays in the main checkout and the
+    commit is on main, although ``W`` names a feature-branch worktree.
+    """
+    assert bash_decision(f"W={worktree}; cd {reference}; git commit -m x", project) == "deny"
+    assert bash_decision(f'W={worktree}; cd "$W"; git commit -m x', project) == "allow"
+
+
+@pytest.mark.parametrize(
+    "second_assignment",
+    ["W=$(pwd)", "W+=/sub", "read W", "for W in a b", "unset W", "declare W"],
+)
+def test_guard_forgets_a_variable_that_gets_an_unknown_value(
+    project: Path, worktree: Path, second_assignment: str
+) -> None:
+    """A variable set again to something the guard can't follow no longer has its old value.
+
+    Started in a feature-branch worktree, ``W`` first names the main checkout. If the
+    guard kept that value it would refuse a commit that happens somewhere else.
+    """
+    command = f'W={project}; {second_assignment}; cd "$W" && git commit -m x'
+    assert bash_decision(command, project, cwd=worktree) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd $NO_SUCH_VARIABLE_HERE && git commit -m x",
+        "git -C $NO_SUCH_VARIABLE_HERE commit -m x",
+        "cd $(mktemp -d) && git commit -m x",
+        "W=$(pwd)/elsewhere; cd $W && git push",
+        "git -C /no/such/folder/anywhere commit -m x",
+        "mkdir -p /no/such/folder/demo && cd /no/such/folder/demo && git commit -m x",
+        "mkdir demo\ncd demo\ngit init -q\ngit commit -m x",
+        "git clone https://example.com/r.git ../fresh && cd ../fresh && git commit -m x",
+        "mkdir -p out/a/b && cd out && git commit -m x",
+        "sudo mkdir -p /no/such/folder/made && cd /no/such/folder/made && git commit -m x",
+        "git worktree add ../wt-new -b feat/new && cd ../wt-new && git commit -m x",
+    ],
+)
+def test_guard_lets_through_what_it_cannot_place(project: Path, command: str) -> None:
+    """When the folder a git command runs in can't be known, the guard does not guess.
+
+    That includes a folder that is missing now but that an earlier command on the
+    same line names, and so may create.
+    """
+    assert bash_decision(command, project) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd /no/such/folder/anywhere; git commit -m x",
+        "cd /no/such/folder/anywhere\ngit commit -m x",
+        "cd /no/such/folder/anywhere || git commit -m x",
+        "mkdir other && cd /no/such/folder/anywhere; git commit -m x",
+        "echo /no/such/folder/anywhere; cd /no/such/folder/anywhere; git commit -m x",
+        "ls /no/such/folder/anywhere || true; cd /no/such/folder/anywhere; git commit -m x",
+    ],
+)
+def test_guard_stays_put_after_a_cd_that_fails(project: Path, command: str) -> None:
+    """A ``cd`` to a folder nothing creates fails, so the commit happens where the shell was."""
+    assert bash_decision(command, project) == "deny"
+
+
+def test_guard_stays_put_after_a_cd_that_names_two_folders(project: Path, worktree: Path) -> None:
+    """The shell refuses ``cd a b`` ("too many arguments"), so it goes nowhere.
+
+    It is a ``cd`` that failed, so a later ``cd -`` does not go back to it either.
+    """
+    assert bash_decision(f"cd {worktree} extra; git commit -m x", project) == "deny"
+    assert bash_decision(f"cd {project} extra; git commit -m x", project, cwd=worktree) == "allow"
+    command = f"cd {worktree}; cd {project} extra; cd -; git commit -m x"
+    assert bash_decision(command, project) == "deny"
+
+
+@pytest.mark.parametrize(
+    ("moves", "decision"),
+    [
+        ("cd {worktree}; cd -", "deny"),
+        ("cd {worktree} && cd - && cd -", "allow"),
+        ("cd {worktree}; cd /no/such/folder/anywhere; cd -", "deny"),
+        ("cd {worktree}; cd .; cd -", "allow"),
+        ("cd {worktree}; cd $NO_SUCH_VARIABLE_HERE; cd -", "allow"),
+        ("cd -", "allow"),
+    ],
+)
+def test_guard_goes_back_with_cd_dash(
+    project: Path, worktree: Path, moves: str, decision: str
+) -> None:
+    """``cd -`` returns to the folder the shell was in before the last ``cd`` that worked.
+
+    The session starts in the main checkout. Where the shell was before that is not
+    known, so a ``cd -`` with no ``cd`` before it leaves the folder unknown.
+    """
+    command = moves.format(worktree=worktree) + "; git commit -m x"
+    assert bash_decision(command, project) == decision
+
+
+@pytest.mark.parametrize("options", ["--", "-L", "-P", "-L --", "-LP"])
+def test_guard_reads_past_the_options_of_cd(project: Path, worktree: Path, options: str) -> None:
+    """An option before the folder is not taken for the folder."""
+    assert bash_decision(f"cd {options} {worktree} && git commit -m x", project) == "allow"
+    command = f"cd {options} {project} && git commit -m x"
+    assert bash_decision(command, project, cwd=worktree) == "deny"
+
+
+@pytest.mark.parametrize(
+    ("command", "decision"),
+    [
+        ("git -C link/.. commit -m x", "deny"),
+        ("cd link && git -C .. commit -m x", "deny"),
+        ("cd -P link/.. && git commit -m x", "deny"),
+        ("cd -PL link/.. && git commit -m x", "allow"),
+        ("cd link/.. && git commit -m x", "allow"),
+        ("cd link && cd .. && git commit -m x", "allow"),
+    ],
+)
+def test_guard_follows_a_link_the_way_the_command_does(
+    project: Path, worktree: Path, command: str, decision: str
+) -> None:
+    """``link/..`` is the folder above the link's target for git, and above the link for ``cd``.
+
+    ``link`` is in the feature-branch worktree and points into the main checkout, so
+    the two readings land on different branches.
+    """
+    (project / "docs").mkdir()
+    link_folder(worktree / "link", project / "docs")
+    assert bash_decision(command, project, cwd=worktree) == decision
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 - <<'EOF'\nprint('then run: git commit -m x')\nEOF",
+        "cat > notes.txt <<EOF\ngit push origin main\nEOF",
+        "cat <<-EOF > notes.txt\n\tgit commit --amend\n\tEOF\necho done",
+        "python3 - <<'PY' && echo ok\ntext = 'git push'\nPY",
+        "cat <<'EOF'\n$(git commit -m x)\nEOF",
+        "cat <<\\EOF\n`git commit -m x`\nEOF",
+        'cat <<"E"OF\n$(git commit -m x)\nEOF',
+        "cat <<EOF\n$(printf ok) git commit -m x\nEOF",
+        "cat <<EOF\ncost: \\$(git commit -m x)\nEOF",
+        "printf bash <<'EOF'\ngit commit -m x\nEOF",
+        "echo bash; cat <<'EOF'\ngit commit -m x\nEOF",
+        "echo \"$(cat <<'EOF'\nhow to: git commit, then git push\nEOF\n)\"",
+    ],
+)
+def test_guard_ignores_here_document_bodies(project: Path, command: str) -> None:
+    """Text fed to another program is data: mentioning a commit there is not a commit."""
+    assert bash_decision(command, project) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat > notes.txt <<EOF\nsome notes\nEOF\ngit commit -m x",
+        "git commit -F - <<'EOF'\nfix: it's done\nEOF",
+        "git commit -m \"$(cat <<'EOF'\nfix: it's done\nEOF\n)\"",
+        "python3 -c 'print(1 << 4)' && git commit -m x",
+        "echo $((1 << n))\ngit commit -m x\nn",
+        "echo hi <<< text && git push",
+    ],
+)
+def test_guard_still_sees_commands_around_a_here_document(project: Path, command: str) -> None:
+    """A real commit before, after or fed by a here-document is still denied on main."""
+    assert bash_decision(command, project) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <<EOF\n$(git commit -m x)\nEOF",
+        "cat <<EOF\nresult: `git commit -m x`\nEOF",
+        "cat <<EOF\n$(echo $(git commit -m x))\nEOF",
+        "cat <<EOF\n$(printf ')' ; git commit -m x)\nEOF",
+        'cat <<EOF\n$(printf "a)b" && git commit -m x)\nEOF',
+        "bash <<'EOF'\ngit commit -m x\nEOF",
+        "/bin/sh -s <<EOF\ncd . && git push\nEOF",
+        "echo ok; sudo bash <<'EOF'\ngit commit -m x\nEOF",
+        "FOO=1 /bin/bash -s <<EOF\ngit commit -m x\nEOF",
+        "cat script | sh <<'EOF'\ngit push\nEOF",
+    ],
+)
+def test_guard_reads_here_document_text_the_shell_runs(project: Path, command: str) -> None:
+    """A command substitution in an unquoted body runs, and so does a body given to a shell."""
+    assert bash_decision(command, project) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo '<<EOF'\ngit commit -m x",
+        'echo "<<EOF"\ngit commit -m x',
+        "echo hi # <<EOF\ngit commit -m x",
+        "echo \\<<EOF\ngit commit -m x\nEOF",
+        "cat <<E\\OF\ntext\nEOF\ngit commit -m x",
+        "cat <<'E'\"OF\"\ntext\nEOF\ngit commit -m x",
+    ],
+)
+def test_guard_takes_only_real_here_document_openers(project: Path, command: str) -> None:
+    """``<<`` in quotes or in a comment opens nothing, so the next line is still a command."""
+    assert bash_decision(command, project) == "deny"
 
 
 def test_guard_leaves_other_repositories_alone(project: Path, tmp_path: Path) -> None:
