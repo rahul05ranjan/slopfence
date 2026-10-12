@@ -16,7 +16,7 @@ slopfence finds the junk that AI coding assistants leave behind (hallucinated pa
 
 ![slopfence checking an AI-written billing service: it finds a dependency that doesn't exist on PyPI, a placeholder comment, leftover "Certainly!" chat text, and three tests that can't fail](https://raw.githubusercontent.com/syedmuhdahmad/slopfence/main/docs/demo.gif)
 
-> 🚧 **Status: alpha (v0.2, Python only).** Nine detectors work, each tuned against 20,000+ files of real-world code for false positives. Expect rough edges. Feedback is very welcome. See [Contributing](#contributing).
+> 🚧 **Status: alpha (v0.2, Python only).** Ten detectors work, each tuned against 20,000+ files of real-world code for false positives. Expect rough edges. Feedback is very welcome. See [Contributing](#contributing).
 
 ---
 
@@ -52,11 +52,12 @@ slopfence --diff main
 | `--diff REF` | Only report issues on lines changed since `REF` (plus new untracked files) |
 | `--format text\|json\|sarif` | Output format. SARIF shows findings inline on GitHub pull requests |
 | `-o, --output FILE` | Write the report to a file |
-| `--offline` | Make no network requests (disables `SLOP001`) |
+| `--offline` | Make no network requests (disables `SLOP001` and `SLOP002`) |
 | `--check-imports` / `--no-check-imports` | Also look up unknown imports in your source code and notebooks on PyPI. Off by default, because it sends those names to pypi.org (see [What slopfence sends over the network](#what-slopfence-sends-over-the-network)) |
 | `--select` / `--ignore` | Comma-separated rule IDs to run or skip, e.g. `--ignore SLOP051` |
 | `--exclude` | Comma-separated paths or globs to skip, e.g. `--exclude migrations,*_pb2.py` |
-| `--known-packages` | Comma-separated private package names or globs that `SLOP001` must accept, e.g. `--known-packages corp-*` |
+| `--known-packages` | Comma-separated package names or globs that `SLOP001` and `SLOP002` must accept without a lookup, e.g. `--known-packages corp-*` |
+| `--min-package-age DAYS` | `SLOP002` reports packages that have been on PyPI for fewer days than this (1 to 365, default 30). See [New packages](#new-packages-slop002) |
 | `--detect-private-index` / `--no-detect-private-index` | Skip PyPI lookups when pip or uv is set up with a private index (on by default). Turn it off if that index only mirrors PyPI. Then a private index in a project file no longer covers the other dependency files. With `--check-imports` it still stops import lookups. See [Private package indexes](#private-package-indexes) |
 | `--fail-on high\|medium\|low` | Lowest severity that fails the run (default `low`: any issue). All issues are still reported |
 | `--baseline FILE` | Hide the findings recorded in `FILE` and report only new ones. See [Baseline: start with the code you have](#baseline-start-with-the-code-you-have) |
@@ -80,7 +81,8 @@ Add a `[tool.slopfence]` table to the `pyproject.toml` at your project root:
 select = ["SLOP001", "SLOP010", "SLOP020"]  # rules to run (default: all)
 ignore = ["SLOP051"]                         # rules to skip
 exclude = ["migrations", "tests/fixtures/", "*_pb2.py"]
-known-packages = ["corp-auth", "corp-*"]    # private packages that aren't on PyPI
+known-packages = ["corp-auth", "corp-*"]    # your own packages: never looked up
+min-package-age = 30                         # SLOP002: days a package must have been on PyPI
 check-imports = false                        # true also looks up imports on PyPI (default: false)
 detect-private-index = true                  # false if your private index only mirrors PyPI
 fail-on = "high"                             # only high-severity issues fail the run
@@ -100,14 +102,14 @@ SLOP040 = "medium"
 
 `per-file-ignores` turns rules off in the files that match a pattern. A pattern works exactly like an `exclude` pattern. Put it in quotes. If several patterns match a file, all their rules are skipped. Unlike `exclude`, every other rule still checks the file. Two details:
 
-- Dependencies and imports in a file where `SLOP001` is off are not looked up on PyPI at all.
+- Dependencies and imports in a file where `SLOP001` is off are not looked up on PyPI at all. So `SLOP002` reports nothing there either.
 - `SLOP030` is off for the functions *in* a matching file. Code anywhere else that copies a helper from `legacy/` is still reported, whichever of the two is older. With `--diff`, it is only reported when its own lines changed. So a change that only adds a copy of your code *inside* `legacy/` passes a `--diff` run, and the next full run reports the older code outside the folder.
 
 `severity` gives a rule another severity: `high`, `medium` or `low`. Text, JSON and SARIF reports, `--fail-on` and `--list-rules` all use it. For example, with `SLOP040 = "high"` a swallowed exception fails a run that uses `--fail-on high`.
 
 `baseline` is explained in [Baseline: start with the code you have](#baseline-start-with-the-code-you-have).
 
-Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `--check-imports`, `--detect-private-index`, `--fail-on`, `--strict`, `--jobs`, `--baseline`) replace the matching config values. `per-file-ignores` and `severity` can only be set in the config. Unknown keys, rule IDs and severities are reported as errors (exit code `2`).
+Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `--min-package-age`, `--check-imports`, `--detect-private-index`, `--fail-on`, `--strict`, `--jobs`, `--baseline`) replace the matching config values. `per-file-ignores` and `severity` can only be set in the config. Unknown keys, rule IDs and severities are reported as errors (exit code `2`).
 
 ### Ignoring a finding
 
@@ -118,9 +120,11 @@ x = legacy()  # slopfence: ignore
 
 Put `# slopfence: ignore-file` anywhere in a file to skip it. In a requirements file, `pyproject.toml`, `setup.cfg` or `Pipfile`, add `# slopfence: ignore` to the end of the line. In a notebook, add it to the end of the `pip install` line, or to a comment line right above it. When the command goes on over several lines, the end of its last line counts. Use the line above on Windows, where the shell passes the comment on to pip. `# slopfence: ignore-file` in any code cell skips the notebook: a Python cell, a `%%bash` cell or any other.
 
+Name the rule to keep the other checks: `brand-new-lib  # slopfence: ignore[SLOP002]`. A dependency or import under a comment that covers `SLOP001` (`ignore`, `ignore[SLOP001]`, `ignore-file`) is not looked up on PyPI, so `SLOP002` says nothing about it either.
+
 To skip a rule in whole files or folders, use [`per-file-ignores`](#configuration). To accept everything a project has today and only see new findings, use a [baseline](#baseline-start-with-the-code-you-have).
 
-**Private packages:** if your project uses internal packages that aren't on PyPI, list them once in `known-packages` instead of adding ignore comments everywhere. Names are matched case-insensitively with `-`, `_` and `.` treated alike (so `corp_auth` matches `corp-auth`), and `*` globs work. Known packages are never looked up on PyPI, and imports of them are never flagged.
+**Your own packages:** if your project uses internal packages that aren't on PyPI, or public packages that your team has just published, list them once in `known-packages` instead of adding ignore comments everywhere. Names are matched case-insensitively with `-`, `_` and `.` treated alike (so `corp_auth` matches `corp-auth`), and `*` globs work. Known packages are never looked up on PyPI, and are never reported by `SLOP001` or `SLOP002`.
 
 `SLOP010` (placeholders) also skips test code and demo or example code: files under `demo/`, `examples/` or `samples/` folders, or named like `demo.py` or `auth_example.py`.
 
@@ -162,8 +166,9 @@ That is the file, the rule, what the finding is about, and how many there are. "
 - It works with `--diff`: only findings on changed lines are reported, and baselined ones stay hidden. It works with `--fail-on` and with every output format. JSON reports have a `baselined` count. SARIF reports leave baselined findings out.
 - Two findings in one file that are about the same thing (two `except Exception: pass` in one function) are counted. If a third appears, one is reported: the one on your changed lines with `--diff`, otherwise the last one in the file.
 - Duplicate functions (`SLOP030`): a full run reports every copy except the first, so the first copy has no line in the file. It is accepted all the same. With `--diff`, editing either copy does not bring the pair back, also when the two are only 90% alike afterwards. (If every line of the first copy changes, it can count as a new function.) Near-copies are only looked for with `--diff`, so a baseline never records one. A near-copy that a change adds is reported. And when you write the baseline again, a pair that is no longer identical drops out of it. A later change to one of the two is then reported, as long as they are still 90% alike. To keep a near-copy, add `# slopfence: ignore[SLOP030]` to its `def` line. A copy added to a file where `SLOP030` is switched off is not reported by a `--diff` run: see [`per-file-ignores`](#configuration).
-- When baselined findings are gone, slopfence says so in a note. Run `--write-baseline` again to drop them from the file. The note only comes when the run checks everything the baseline holds. So it never comes with `--diff`, and not when the paths you give, or `exclude`, `select` and `ignore`, leave out files or rules that the baseline has findings for. It never counts `SLOP001`: a missing answer from PyPI must not look like a fix.
-- `--write-baseline` records every finding of that run and reports none. Use the options your normal runs use (`--select`, `--check-imports`…). Run it online: without answers from PyPI there are no `SLOP001` findings to record, and a note says so. It can't be combined with `--diff`.
+- When baselined findings are gone, slopfence says so in a note. Run `--write-baseline` again to drop them from the file. The note only comes when the run checks everything the baseline holds. So it never comes with `--diff`, and not when the paths you give, or `exclude`, `select` and `ignore`, leave out files or rules that the baseline has findings for. It never counts `SLOP001` or `SLOP002`: a missing answer from PyPI must not look like a fix.
+- A baselined `SLOP002` finding stays hidden while the package is new or has a single release. If PyPI quarantines the package later, that is a new finding.
+- `--write-baseline` records every finding of that run and reports none. Use the options your normal runs use (`--select`, `--check-imports`…). Run it online: without answers from PyPI there are no `SLOP001` or `SLOP002` findings to record, and a note says so. It can't be combined with `--diff`.
 - `--write-baseline` only replaces a baseline. It stops if `FILE` is some other file. It also stops if `FILE` holds findings that this run does not check: for files outside the paths you give, for files you exclude, or for rules that are switched off. Check everything the baseline holds, or delete `FILE` first.
 - `baseline` in the config is relative to the project root. `--baseline FILE` is relative to the folder you are in, and it replaces the config value. `--no-baseline` shows everything again.
 - The paths inside the file are relative to the project root. That is the git repository the checked path is in. Without git, it is the folder you run slopfence from (or the checked folder, when that is somewhere else), so run slopfence the same way every time. If no file that the baseline names exists there, slopfence says so in a note, and `--write-baseline` does not replace the file.
@@ -182,6 +187,8 @@ That is the file, the rule, what the finding is about, and how many there are. "
 | `Pipfile` | `[packages]` and `[dev-packages]` |
 | Notebooks (`.ipynb`) | `pip install` lines in code cells: `%pip install x`, `!pip install x`, `!python -m pip install x`, `!uv pip install x`, and the lines of a `%%bash` cell. With `--check-imports`, also the imports in code cells |
 
+`SLOP002` reads the same files, and reports where `SLOP001` would.
+
 A requirements file is a `.txt` or `.in` file whose name starts or ends with `requirements` or `constraints`: `requirements-dev.txt`, `dev-requirements.txt`, `requirements.in`, `constraints.txt`. Any `.txt` or `.in` file inside a folder named `requirements` is one too: `requirements/base.txt`. When the name mentions another package manager (`apt-requirements.txt`, `requirements-conda.txt`), the packages in the file are not read: they are not PyPI names. A private index that such a file names still counts. `CMakeLists.txt` is never read.
 
 Some names are read and never looked up:
@@ -196,7 +203,7 @@ Known limit: a list for another tool whose names mostly exist on PyPI too (`git`
 
 **Notebooks.** A finding has the line and column of the `.ipynb` file itself, the lines that `git diff` shows. So `--diff` and SARIF work. A notebook saved on one line has all its findings on line 1, at different columns. One limit: when a git clean filter strips the outputs of a notebook on commit (tools like `nbstripout` can set one up), `git diff` counts the lines of the stripped text. `--diff` can then miss a finding in a notebook that still has its outputs in your working copy. Clear the outputs, or run without `--diff`. Some details:
 
-- Only `SLOP001` reads notebooks, and only their code cells.
+- Only `SLOP001` and `SLOP002` read notebooks, and only their code cells.
 - A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. An index or links option in it still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`, `%PKG%`), none of its names is looked up.
 - With `--check-imports`, a module that a cell writes (`%%writefile utils.py`) is the notebook's own. And the imports of a notebook are not looked up at all when one of its `pip install` lines installs something without a name: a path, a URL without `#egg=`, `-r requirements.txt`, `-e .`, a variable, or a command with an option slopfence doesn't know. Any import may come from there.
 - A notebook larger than 20 MB is not read, and a note says so.
@@ -204,14 +211,16 @@ Known limit: a list for another tool whose names mostly exist on PyPI too (`git`
 
 ### What slopfence sends over the network
 
-slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001`. It sends a request per package name (`HEAD https://pypi.org/pypi/<name>/json`) and nothing else: no code, no file names, no telemetry. Up to 8 requests are sent at a time. That changes how fast the answers arrive, not what is sent.
+slopfence only talks to one server, `https://pypi.org`, and only for `SLOP001` and `SLOP002`. It sends one request per package name (`GET https://pypi.org/simple/<name>/`, asking for the first 16 KB of the package's file list) and nothing else: no code, no file names, no telemetry. The answer tells `SLOP001` whether the package exists, and `SLOP002` when its files were uploaded. When the file list is longer than 16 KB and every file in that part is less than a year old, slopfence asks the same address once more, for the whole list, and reads at most 512 KB. A redirect is never followed. Up to 8 requests are sent at a time. That changes how fast the answers arrive, not what is sent.
+
+`SLOP002` never sends a name that `SLOP001` would not send. Ignoring `SLOP001` sends nothing, as before, unless `select` names `SLOP002` (see [New packages](#new-packages-slop002)).
 
 | Names sent to PyPI | When |
 |---|---|
 | Dependencies declared in requirements files, `pyproject.toml`, `setup.cfg`, `setup.py`, `Pipfile`, and `pip install` lines in notebooks (see [Where `SLOP001` finds dependencies](#where-slop001-finds-dependencies)) | By default. These names are already meant for a package index. Entries installed from URLs, paths or git are never sent, also where another file names the same package without the URL. Neither is a package of your own project, or any dependency that may come from a private index (see [Private package indexes](#private-package-indexes)) |
 | Imports in your source code and notebooks that aren't stdlib, installed, part of your project, or provided by a declared or locked package | **Only with `--check-imports`** (or `check-imports = true`). This can catch an invented package that was imported but never declared, but for private code it may reveal internal package names |
 
-Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`, or a dependency or import under an [ignore comment](#ignoring-a-finding) (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`). Answers are cached for a day (missing) or a week (found) in `~/.cache/slopfence`, so repeated runs send fewer requests. With `--diff`, only the dependency files in the diff are looked up. `--offline` sends nothing at all.
+Names in `known-packages` are never sent. Neither are the dependencies and imports of a file where `SLOP001` is switched off with `per-file-ignores`, or a dependency or import under an [ignore comment](#ignoring-a-finding) (`# slopfence: ignore` on its line, or `# slopfence: ignore-file`). Answers are cached in `~/.cache/slopfence`: for a week when the package exists, and for a day when it is missing, less than a year old or quarantined. So repeated runs send fewer requests. A name that PyPI can't hold as a package name (`café`, `_private`) is never sent. With `--diff`, only the dependency files in the diff are looked up. `--offline` sends nothing at all.
 
 ### Private package indexes
 
@@ -237,13 +246,44 @@ It also stops lookups for the dependency files that v0.2 did not read: `setup.py
 
 `--find-links` and `--no-index` name no index. They only ever cover their own file.
 
-A private index in your **environment** (variables, pip or uv configuration) could serve any package, so `SLOP001` makes **no lookups at all** and the report says so in a note. An index is public only if its host is `pypi.org`, `files.pythonhosted.org` or `pypi.python.org`. TestPyPI (`test.pypi.org`) is another index, so it counts as private. slopfence never prints index URLs, because they can contain credentials.
+A private index in your **environment** (variables, pip or uv configuration) could serve any package, so `SLOP001` and `SLOP002` make **no lookups at all** and the report says so in a note. An index is public only if its host is `pypi.org`, `files.pythonhosted.org` or `pypi.python.org`. TestPyPI (`test.pypi.org`) is another index, so it counts as private. slopfence never prints index URLs, because they can contain credentials.
 
 If your company index only **mirrors** PyPI, set `detect-private-index = false` (or pass `--no-detect-private-index`) to check packages against PyPI again, and list your own private packages in `known-packages`.
 
 ### Imports with a different package name
 
 With `--check-imports`, an import isn't looked up when a declared dependency or a locked package provides it, even if the names differ and the package isn't installed where slopfence runs. For example, `import bs4` is covered by `beautifulsoup4`, `import dateutil` by `python-dateutil`, and `from google.cloud import storage` by `google-cloud-storage`. slopfence reads `uv.lock`, `poetry.lock`, `pdm.lock` and `Pipfile.lock`, so indirect dependencies count too (`import idna` when only `requests` is declared).
+
+### New packages (`SLOP002`)
+
+`SLOP001` only reports an invented package name until someone registers it. Attackers do exactly that. `SLOP002` looks at the packages that do exist on PyPI, and reports the ones that are too new to trust without a look:
+
+| When | Example |
+|---|---|
+| Its oldest file on PyPI is less than 30 days old | `Dependency 'flask-jwt-simple-auth' is new on PyPI (oldest upload 2026-10-02, 1 release): check its PyPI page and make sure it is the package you mean (slopsquatting risk)` |
+| It is less than a year old and has only one release | `Dependency 'acme-token-utils' has only one release on PyPI (uploaded 2026-06-01): check its PyPI page and make sure it is the package you mean (slopsquatting risk)` |
+
+If PyPI itself marks a package as quarantined (suspected malware), `SLOP002` reports that too, whatever the package's age.
+
+A finding means "look before you install", not "this is malware". Open the package's page on pypi.org. Is it the project you meant? Does it link to a real repository? If yes, add `# slopfence: ignore[SLOP002]` to its line. The finding also goes away by itself when the package gets older or gets a second release.
+
+No finding does not mean that a package is safe. `SLOP002` finds names that were registered recently, or registered once and left. An attacker who publishes two releases and waits a month is not reported. Neither is a package whose file list is longer than 512 KB.
+
+To stay quiet, `SLOP002` never reports:
+
+- a package whose oldest file is a year old or more (unless PyPI has quarantined it),
+- a package because of its name: `httpx2` is not reported for looking like `httpx`,
+- your own packages: every name in a `pyproject.toml`, `setup.cfg` or `setup.py` of your project,
+- names in `known-packages`, and anything else that isn't looked up (URLs, paths, git, private indexes, `--offline`),
+- anything when PyPI can't be reached, or when its answer can't be read.
+
+`min-package-age = 90` (or `--min-package-age 90`) makes the first check stricter. It takes 1 to 365 days. The one-release check always looks back one year.
+
+`SLOP002` uses the answers to `SLOP001`'s lookups and sends no names of its own. On a line or in a file where `SLOP001` is ignored, the name is not looked up, so `SLOP002` says nothing about it either. If you ignore `SLOP001` for the whole project, no lookups are made, `SLOP002` does not run, and the report says so in a note. To run `SLOP002` without `SLOP001`, name it in `select`.
+
+With `--check-imports`, an import that isn't installed or declared is checked the same way.
+
+The result depends on the date. With the same answers from PyPI, a finding can go away when the package gets older, and none can appear. Messages name the upload date, not the age, so a report reads the same all day. Days are counted in UTC.
 
 ### What the code-quality rules skip
 
@@ -367,7 +407,7 @@ AI reviewers are smart but nondeterministic and cost money on every run. slopfen
 | ID | Detector | Severity | Status |
 |---|---|---|---|
 | `SLOP001` | Dependency (or, with `--check-imports`, import) of a package that doesn't exist on PyPI | 🔴 High | ✅ v0.1 (Python) |
-| `SLOP002` | Dependency that is very new or has suspiciously few downloads (slopsquatting risk) | 🔴 High | Planned |
+| `SLOP002` | Dependency (or, with `--check-imports`, import) of a package that exists on PyPI but is new, has a single release or is quarantined (slopsquatting risk) | 🔴 High | ✅ v0.3 |
 | `SLOP010` | Placeholder / stub comment (`In a real implementation…`, `Simplified for demo`) | 🟠 Medium | ✅ v0.1 |
 | `SLOP011` | Function whose docstring promises work ("Validate the token") but which only returns hardcoded data or nothing | 🟠 Medium | ✅ v0.2 |
 | `SLOP020` | Test that only asserts on its own mocks | 🔴 High | ✅ v0.1 |
@@ -416,7 +456,7 @@ tests/test_user.py
 
 - **Parser:** slopfence uses Python's built-in `ast` and `tokenize` (no dependencies). **tree-sitter** is planned so new languages can be added without rewriting the detectors.
 - **Workers:** files are parsed and checked in worker processes when there are enough of them (see [Speed](#speed)). Only a small summary of each file comes back: its findings, function fingerprints and import names. So memory stays low. Registry lookups stay in the main process.
-- **Registry lookups** are cached locally (`~/.cache/slopfence`) to stay fast and avoid rate limits. If PyPI can't be reached, nothing is flagged: an unknown answer is never treated as "missing". Import names are only sent with `--check-imports` (see [What slopfence sends over the network](#what-slopfence-sends-over-the-network)).
+- **Registry lookups** are cached locally (`~/.cache/slopfence`) to stay fast and avoid rate limits. If PyPI can't be reached, nothing is flagged: an unknown answer is never treated as "missing". A rate limit, or any other answer that isn't PyPI's, ends the lookups for that run. Import names are only sent with `--check-imports` (see [What slopfence sends over the network](#what-slopfence-sends-over-the-network)).
 - **Optional LLM mode** (planned, not built yet) would send only the unclear cases for a second opinion. Never required.
 
 ## Challenges (and how we plan to handle them)
@@ -487,7 +527,7 @@ Tracked in the [v0.2.0 milestone](https://github.com/syedmuhdahmad/slopfence/mil
 - [x] Per-file ignores and per-rule severity overrides ([#52](https://github.com/syedmuhdahmad/slopfence/issues/52))
 - [x] `SLOP001` also checks `setup.py`, `setup.cfg`, `Pipfile`, notebooks and more requirements file names ([#53](https://github.com/syedmuhdahmad/slopfence/issues/53))
 - [ ] JavaScript / TypeScript (npm registry)
-- [ ] Slopsquatting risk scoring (`SLOP002`)
+- [x] `SLOP002` slopsquatting risk: dependencies that exist on PyPI but are new ([#39](https://github.com/syedmuhdahmad/slopfence/issues/39))
 - [ ] VS Code extension
 - [ ] Optional `--llm` second opinion
 
