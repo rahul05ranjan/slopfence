@@ -118,7 +118,7 @@ Command-line options (`--select`, `--ignore`, `--exclude`, `--known-packages`, `
 x = legacy()  # slopfence: ignore
 ```
 
-Put `# slopfence: ignore-file` anywhere in a file to skip it. In a requirements file, `pyproject.toml`, `setup.cfg` or `Pipfile`, add `# slopfence: ignore` to the end of the line. In a notebook, add it to the end of the `pip install` line, or to a comment line right above it. When the command goes on over several lines, the end of its last line counts. Use the line above on Windows, where the shell passes the comment on to pip. `# slopfence: ignore-file` in any code cell skips the notebook: a Python cell, a `%%bash` cell or any other.
+Put `# slopfence: ignore-file` anywhere in a file to skip it. In a requirements file, `pyproject.toml`, `setup.cfg` or `Pipfile`, add `# slopfence: ignore` to the end of the line. A requirement that goes on over several lines (a pin with `--hash` lines, each ending in `\`) takes the comment at the end of its last line, the only place where pip allows one. In a notebook, add it to the end of the `pip install` line, or to a comment line right above it. When the command goes on over several lines, the end of its last line counts. Use the line above on Windows, where the shell passes the comment on to pip. `# slopfence: ignore-file` in any code cell skips the notebook: a Python cell, a `%%bash` cell or any other.
 
 Name the rule to keep the other checks: `brand-new-lib  # slopfence: ignore[SLOP002]`. A dependency or import under a comment that covers `SLOP001` (`ignore`, `ignore[SLOP001]`, `ignore-file`) is not looked up on PyPI, so `SLOP002` says nothing about it either.
 

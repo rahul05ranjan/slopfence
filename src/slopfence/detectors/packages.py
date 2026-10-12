@@ -402,6 +402,22 @@ def _requirements_sources(lines: list[str]) -> tuple[bool, bool]:
     return index, links
 
 
+def _last_lines(lines: list[str]) -> list[str]:
+    """For each line of a requirements file, the last line of the requirement it is part of.
+
+    A line that ends with a backslash goes on in the next one: a pin with its
+    ``--hash`` options is written that way. A comment line never goes on. pip only
+    takes a comment at the end of the last line: anywhere before it, the comment
+    would swallow the rest of the requirement.
+    """
+    last = list(lines)
+    # From the end, so that a file of nothing but lines that go on is walked once.
+    for at in range(len(lines) - 2, -1, -1):
+        if lines[at].endswith("\\") and not lines[at].lstrip().startswith("#"):
+            last[at] = last[at + 1]
+    return last
+
+
 def _parse_requirements(text: str, rel: str) -> DependencyFile:
     """Dependencies in a requirements file, with the line each one is on.
 
@@ -419,8 +435,10 @@ def _parse_requirements(text: str, rel: str) -> DependencyFile:
     valid = prose = 0
     # Whether any line uses pip's own syntax: an option, a URL, a version, an extra.
     pip_syntax = False
-    for lineno, raw in enumerate(lines, start=1):
+    for lineno, (raw, last) in enumerate(zip(lines, _last_lines(lines), strict=True), start=1):
         ignored = line_ignores(requirements_comment(raw))
+        if last is not raw:
+            ignored |= line_ignores(requirements_comment(last))
         line = REQ_COMMENT.sub("", raw).strip()
         if not line:
             continue

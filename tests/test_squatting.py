@@ -417,6 +417,30 @@ def test_ignore_slop002_in_every_dependency_format(write, check, rel):
     assert sorted(registry.queries) == ["gone-zz", "loud-new", "quiet-new"]
 
 
+def test_ignore_comment_at_the_end_of_a_hashed_pin(write, check):
+    """A pin with ``--hash`` lines is one requirement over several lines. pip only
+    takes a comment at the end of its last line, so that is where the directive counts."""
+    digest = "--hash=sha256:" + "a" * 64
+    write(
+        "requirements.txt",
+        f"quiet-new==1.0 \\\n    {digest} \\\n    {digest}  # slopfence: ignore[SLOP002]\n"
+        f"loud-new==1.0 \\\n    {digest}\n"
+        f"gone-zz==1.0 \\\n    {digest}  # slopfence: ignore[SLOP002]\n"
+        f"hidden-new==1.0 \\\n    {digest}  # slopfence: ignore\n"
+        "# slopfence: ignore[SLOP002] \\\n"  # a comment line never goes on, also for pip
+        "last-new==1.0\n",
+    )
+    registry = pypi("quiet-new", "loud-new", "hidden-new", "last-new")
+    result = check(registry=registry, now=NOW)
+    assert findings(result) == [
+        ("SLOP002", "requirements.txt", 4),
+        ("SLOP001", "requirements.txt", 6),
+        ("SLOP002", "requirements.txt", 11),
+    ]
+    # A comment that covers SLOP001 keeps the name on the machine, as on one line.
+    assert sorted(registry.queries) == ["gone-zz", "last-new", "loud-new", "quiet-new"]
+
+
 def test_ignore_slop002_on_a_pip_line_of_a_notebook(write, check):
     """At the end of the command, or on a comment line right above it."""
     cell = (
