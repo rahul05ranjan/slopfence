@@ -196,6 +196,11 @@ def parse_setup_cfg(text: str, rel: str) -> DependencyFile:
 # steps. Without a limit, a generated file with a thousand nested expressions would
 # end the run with a RecursionError.
 _MAX_DEPTH = 20
+# How many steps one file gets for following names and expressions. One step is taken
+# per list and per string, so a file with 5,000 requirements takes about 5,000. A name
+# is followed each time it is used: a list built from eight uses of the list before
+# it, seven lists deep, would take more than two million (8 ** 7).
+_MAX_STEPS = 50_000
 _NO_NAMES: frozenset[str] = frozenset()
 
 
@@ -276,6 +281,8 @@ class _SetupScript:
         """
         self.tree = tree
         self.nodes = nodes
+        # How many expressions were followed so far (see ``_MAX_STEPS``).
+        self.steps = 0
         # name -> values from ``name = v`` and ``name: T = v``.
         self.assigned: dict[str, list[ast.expr]] = {}
         # name -> values from ``name += v``: more items for a list.
@@ -302,6 +309,18 @@ class _SetupScript:
                 else:
                     self.assigned.setdefault(name, []).append(value)
 
+    def _too_far(self, depth: int) -> bool:
+        """Count one step, and say whether to stop: the expression is nested too
+        deeply, or the file has used up its steps."""
+        self.steps += 1
+        return depth > _MAX_DEPTH or self.gave_up
+
+    @property
+    def gave_up(self) -> bool:
+        """Whether the file needed more steps than it gets. What was read is then
+        only a part, cut off at no particular place."""
+        return self.steps > _MAX_STEPS
+
     def strings(
         self, node: ast.expr, seen: frozenset[str] = _NO_NAMES, depth: int = 0
     ) -> list[ast.Constant]:
@@ -312,7 +331,7 @@ class _SetupScript:
         ``reqs = "requirements.txt"`` followed by ``reqs = open(reqs).readlines()``,
         the string is a file name, not a requirement.
         """
-        if depth > _MAX_DEPTH:
+        if self._too_far(depth):
             return []
         if literal := _string(node):
             return [literal]
@@ -331,7 +350,7 @@ class _SetupScript:
     def _list(self, node: ast.expr, seen: frozenset[str], depth: int) -> list[ast.Constant] | None:
         """The string literals in a list-like expression, or None if ``node`` isn't
         certainly a list (so ``"pkg==" + version`` never counts as two requirements)."""
-        if depth > _MAX_DEPTH:
+        if self._too_far(depth):
             return None
         if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
             found: list[ast.Constant] = []
@@ -366,7 +385,7 @@ class _SetupScript:
         self, node: ast.expr, seen: frozenset[str] = _NO_NAMES, depth: int = 0
     ) -> list[ast.Constant]:
         """String literals in the values of an ``extras_require`` mapping."""
-        if depth > _MAX_DEPTH:
+        if self._too_far(depth):
             return []
         found: list[ast.Constant] = []
         if isinstance(node, ast.Dict):
@@ -401,7 +420,7 @@ class _SetupScript:
         self, node: ast.expr, name: str, seen: frozenset[str], depth: int
     ) -> list[ast.expr]:
         """Values stored under the key ``name`` in a mapping expression."""
-        if depth > _MAX_DEPTH:
+        if self._too_far(depth):
             return []
         found: list[ast.expr] = []
         if isinstance(node, ast.Dict):
@@ -466,7 +485,8 @@ def parse_setup_py(src: SourceFile) -> DependencyFile:
     """Dependencies passed to ``setup()`` in a setup.py, when they are written out.
 
     Read from the syntax tree: the file is never run. Each dependency is reported at
-    the string literal that names it.
+    the string literal that names it. A file whose expressions take more steps to
+    follow than a file gets (``_MAX_STEPS``) declares no dependency.
     """
     found = DependencyFile(src.rel, Kind.SETUP_PY)
     script = _SetupScript(src.tree, src.nodes)
@@ -503,5 +523,7 @@ def parse_setup_py(src: SourceFile) -> DependencyFile:
                         own_source=parsed.direct,
                     )
                 )
+    if script.gave_up:
+        found.dependencies = []
     found.dependencies.sort(key=lambda dep: (dep.line, dep.col, dep.name))
     return found

@@ -1014,6 +1014,29 @@ def test_setup_py_long_and_deep_expressions(write, tmp_path):
     assert names == [f"alt{n}" for n in range(20)]
 
 
+def repeated(levels):
+    """A setup.py where each list is the one before it, eight times over."""
+    lists = "".join(f"a{n} = " + " + ".join([f"a{n - 1}"] * 8) + "\n" for n in range(1, levels))
+    return (
+        "from setuptools import setup\na0 = ['requests']\n"
+        f"{lists}setup(name='demo', install_requires=a{levels - 1})\n"
+    )
+
+
+def test_a_name_used_many_times_is_not_followed_without_end(write, tmp_path):
+    """A name is followed each time it is used. Eight uses of the list before it, seven
+    lists deep, would be more than two million steps for a file of 400 bytes. A file
+    gets a fixed number of steps. One that needs more is generated, and declares
+    nothing that can be relied on."""
+    path = write("setup.py", repeated(levels=3))
+    assert brief(path, tmp_path) == [("requests", 2, True)]
+    path = write("setup.py", repeated(levels=8))
+    start = time.perf_counter()
+    declared = parse_dependency_file(path, tmp_path)
+    assert time.perf_counter() - start < 5
+    assert declared.dependencies == [] and declared.project_names == {"demo"}
+
+
 @pytest.mark.parametrize(
     "expression",
     ['"a" + ' * 100_000 + '"b"', "~" * 20_000 + "1", "lambda: " * 5000 + "1"],
