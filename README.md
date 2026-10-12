@@ -196,7 +196,7 @@ Known limit: a list for another tool whose names mostly exist on PyPI too (`git`
 **Notebooks.** A finding has the line and column of the `.ipynb` file itself, the lines that `git diff` shows. So `--diff` and SARIF work. A notebook saved on one line has all its findings on line 1, at different columns. Some details:
 
 - Only `SLOP001` reads notebooks, and only their code cells.
-- A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. An index or links option in it still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`), none of its names is looked up.
+- A `pip install` command is read as text and never run. A command with an option slopfence doesn't know names no package. An index or links option in it still counts, whatever its value is. When a command holds a variable (`$PKG`, `{pkg}`, `%PKG%`), none of its names is looked up.
 - A notebook larger than 20 MB is not read, and a note says so.
 - To leave notebooks out, add `"*.ipynb"` to `exclude`.
 
@@ -221,7 +221,7 @@ If your packages may come from an index other than PyPI, a name that PyPI doesn'
 | `pyproject.toml` | `[[tool.poetry.source]]` (except `explicit` ones), `[[tool.uv.index]]` (except `explicit` ones), `[tool.uv] index-url` / `extra-index-url` (also under `[tool.uv.pip]`), `[[tool.pdm.source]]`: that file's packages. A per-dependency Poetry `source` or `[tool.uv.sources]` entry: that package |
 | `Pipfile`, `Pipfile.lock` | A `[[source]]` that isn't PyPI: that `Pipfile`'s packages. An entry with `git`, `path`, `file`, `url`, or an `index` that is not a PyPI source: that package |
 | `setup.cfg`, `setup.py` | `dependency_links`, and in `setup.cfg` also `[easy_install]` with `find_links` or with an `index_url` that is not PyPI: that file's packages, and those of the `setup.py` or `setup.cfg` in the same folder (setuptools reads the two as one) |
-| Notebooks | An index option in a `pip install` line (`-i`, `--index-url`, `--extra-index-url`, uv's `--index`) with a non-PyPI URL: that notebook's packages. Any code cell that mentions an index setting outside such a line (`pip config`, `PIP_INDEX_URL`, `UV_INDEX`, `pip.conf`, `codeartifact`, `keyring`): the same. `-f` / `--find-links` or `--no-index` in a `pip install` line: that notebook's packages and imports, and nothing else |
+| Notebooks | An index option in a `pip install` line (`-i`, `--index-url`, `--extra-index-url`, uv's `--index`) with a non-PyPI URL: that notebook's packages. Any code cell that mentions an index setting anywhere else (`pip config`, `PIP_INDEX_URL`, `PIP_CONFIG_FILE`, `UV_INDEX`, `pip.conf`, `codeartifact`, `keyring`): the same. That includes a `pip install` line that names such a thing as a package or as another option (`pip install keyring`, `--keyring-provider`). `-f` / `--find-links` or `--no-index` in a `pip install` line: that notebook's packages and imports, and nothing else |
 | Environment variables | `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `UV_INDEX`, `UV_DEFAULT_INDEX`, `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL` |
 | pip configuration | `pip.conf` / `pip.ini` in pip's global, user and virtualenv locations, and `PIP_CONFIG_FILE` (`[global]` and `[install]` sections) |
 | uv configuration | `uv.toml` in the project, user and system config folders, or `UV_CONFIG_FILE` (`UV_NO_CONFIG` turns this off), including its `[pip]` table used by `uv pip install` |

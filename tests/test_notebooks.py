@@ -132,6 +132,7 @@ def test_pip_install_lines(line, names):
         # A variable may hold anything, an index option too: nothing is looked up.
         ("pip install $PACKAGE {pkg} foo=={version} bar==$VER `cmd`", ([], ["foo", "bar"], False, False)),  # noqa: E501
         ("pip install $OPTS corp-auth", ([], ["corp-auth"], False, False)),
+        ("pip install %PIP_OPTS% corp-auth", ([], ["corp-auth"], False, False)),  # Windows
         ("pip install corp-auth --index-url $index", ([], ["corp-auth"], True, False)),
         ('pip install "pkg\\$x" other', ([], ["other"], False, False)),
         # An option this version doesn't know could take a value: no word of the
@@ -341,6 +342,13 @@ def test_an_index_in_a_notebook_stops_import_lookups_everywhere(write, check, no
         ["import keyring", "%pip install corp-auth"],
         ["%env PIP_FIND_LINKS=/mnt/wheels", "%pip install corp-auth"],
         ["# pip.ini on the cluster sets the index", "%pip install corp-auth"],
+        ["%env PIP_CONFIG_FILE=/dbfs/FileStore/pip.cfg", "%pip install corp-auth"],
+        # In a command that was read: as a package, and as another option.
+        ["!pip install keyring keyrings.google-artifactregistry-auth", "!pip install corp-auth"],
+        ["!pip install keyring keyrings.google-artifactregistry-auth corp-auth"],
+        ["%pip install keyrings.codeartifact", "%pip install corp-auth"],
+        ["!pip install --keyring-provider subprocess corp-auth"],
+        ["!uv pip install --keyring-provider subprocess corp-auth"],
     ],
 )  # fmt: skip
 def test_an_index_set_outside_the_install_line_makes_the_notebook_private(write, check, cells):
@@ -364,6 +372,12 @@ def test_an_index_option_that_names_pypi_is_not_a_private_setting(write, check):
     registry = FakeRegistry(set())
     assert subjects(check("SLOP001", registry=registry)) == ["ghost-a"]
     assert registry.queries == ["ghost-a"]
+    # Links in a command that was read cover the notebook's packages, and name no index.
+    write("a.ipynb", jupyter(["%pip install --find-links=./wheels corp-a\n"]))
+    write("b.ipynb", jupyter(["%pip install ghost-c\n"]))
+    write("app.py", "import ghost_mod\n")
+    result = check("SLOP001", registry=FakeRegistry(set()), check_imports=True)
+    assert subjects(result) == ["ghost_mod", "ghost-c"] and result.notes == []
 
 
 def test_notebook_inherits_a_private_index_from_the_project(write, check, tmp_path):

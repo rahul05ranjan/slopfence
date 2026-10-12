@@ -28,8 +28,8 @@ _PIP = re.compile(r"pip[0-9.]*$")
 # What a double-quoted shell string lets a backslash escape. Any other backslash stays.
 _DOUBLE_QUOTE_ESCAPE = re.compile(r'\\(["\\$`])')
 # A word that still holds one of these was not a fixed string for the shell: "$PKG",
-# "{package}" (IPython fills it in), "`cmd`".
-_UNEXPANDED = re.compile(r"[${`]")
+# "{package}" (IPython fills it in), "`cmd`", and "%PKG%" on Windows.
+_UNEXPANDED = re.compile(r"[${`]|%\w+%")
 
 # ``pip install`` and ``uv pip install`` options that take no value.
 PIP_FLAGS = frozenset(
@@ -172,6 +172,9 @@ class PipInstall:
     private_index: bool = False
     # The command adds links to install from (--find-links), or uses no index at all.
     links: bool = False
+    # (start, end) of each index or links option, with its value where it was read.
+    # What these words say about package sources is in the two fields above.
+    source_options: list[tuple[int, int]] = field(default_factory=list)
 
 
 def _short_options(cluster: str) -> tuple[str, str | None] | None:
@@ -215,11 +218,16 @@ def _unread(arguments: list[Word]) -> PipInstall:
     An index or links option among its words still says that packages may come
     from another place than PyPI, whatever its value is.
     """
-    options = [word.text.partition("=")[0] for word in arguments if word.text.startswith("-")]
-    return PipInstall(
-        private_index=any(option in INDEX_OPTIONS or option[:2] == "-i" for option in options),
-        links=any(option in LINK_OPTIONS or option[:2] == "-f" for option in options),
-    )
+    found = PipInstall()
+    for word in arguments:
+        option = word.text.partition("=")[0]
+        index = option in INDEX_OPTIONS or option[:2] == "-i"
+        links = option in LINK_OPTIONS or option[:2] == "-f"
+        found.private_index = found.private_index or index
+        found.links = found.links or links
+        if index or links:
+            found.source_options.append((word.start, word.end))
+    return found
 
 
 def pip_requirements(arguments: list[Word]) -> PipInstall:
@@ -247,13 +255,17 @@ def pip_requirements(arguments: list[Word]) -> PipInstall:
                 return _unread(arguments)
             option, attached = short
             has_value, value = ("=", attached) if attached else ("", "")
+        last = word
         if option in PIP_VALUE_OPTIONS:
             if not has_value:
-                value = next(words, Word("", 0, 0)).text
+                last = next(words, word)
+                value = last.text if last is not word else ""
             if option in INDEX_OPTIONS and not is_public_index(named_index_url(value)):
                 found.private_index = True
         elif option and option not in PIP_FLAGS:
             return _unread(arguments)
-        found.links = found.links or option in LINK_OPTIONS
+        if option in INDEX_OPTIONS or option in LINK_OPTIONS:
+            found.links = found.links or option in LINK_OPTIONS
+            found.source_options.append((word.start, last.end))
     found.variables = any(_UNEXPANDED.search(word.text) for word in arguments)
     return found

@@ -368,12 +368,13 @@ def view_cell(text: str, want_imports: bool) -> CellView:
 
 # --- What the engine uses ----------------------------------------------------------
 
-# Text that says where packages come from, outside a ``pip install`` command that was
-# read: "pip config set global.index-url ...", PIP_EXTRA_INDEX_URL, UV_INDEX, a
-# pip.conf that the notebook writes, a login to a company's package store.
+# Text that says where packages come from, anywhere but in an index or links option
+# of a ``pip install`` command that was read: "pip config set global.index-url ...",
+# PIP_EXTRA_INDEX_URL, UV_INDEX, a pip.conf that the notebook writes or names, a
+# login to a company's package store, the package that does the login.
 _INDEX_SETTING = re.compile(
-    r"index[-_]url|uv_(?:default_)?index|find[-_]links|pip\s+config|pip\.conf|pip\.ini"
-    r"|codeartifact|artifactregistry|keyring",
+    r"index[-_]url|uv_(?:default_)?index|find[-_]links|pip\s+config|pip_config_file"
+    r"|pip\.conf|pip\.ini|codeartifact|artifactregistry|keyring",
     re.I,
 )
 
@@ -383,14 +384,14 @@ def _offset(lines: list[str], lineno: int, col: int) -> int:
     return sum(len(line) + 1 for line in lines[: lineno - 1]) + col
 
 
-def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool, tuple[int, int]]]:
+def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool]]:
     """Every ``pip install`` command of a cell.
 
-    Yields what the command says, whether an ignore comment covers it, and the part
-    of the cell's text its arguments take up. The comment may be at the end of the
-    command, which is the end of its last line when it goes on over several. Or it
-    is on a comment-only line right above the command: on Windows a shell line
-    passes ``# ...`` on to pip, so there the comment can't share the line.
+    Yields what the command says, and whether an ignore comment covers it. The
+    comment may be at the end of the command, which is the end of its last line
+    when it goes on over several. Or it is on a comment-only line right above the
+    command: on Windows a shell line passes ``# ...`` on to pip, so there the
+    comment can't share the line.
     """
     lines = cell.text.split("\n")
     for offset, n in view.commands:
@@ -404,12 +405,16 @@ def _installs(cell: Cell, view: CellView) -> Iterator[tuple[PipInstall, bool, tu
         )
         for words in commands:
             if arguments := pip_install_arguments(words):
-                yield pip_requirements(arguments), ignored, (arguments[0].start, arguments[-1].end)
+                yield pip_requirements(arguments), ignored
 
 
 def _mentions_an_index(text: str, understood: list[tuple[int, int]]) -> bool:
-    """Whether a cell's text names a package index anywhere but in the parts that
-    were read as ``pip install`` commands (``understood``)."""
+    """Whether a cell's text names a package index anywhere but in the index and
+    links options of ``pip install`` commands that were read (``understood``).
+
+    The rest of such a command counts: ``pip install keyring`` and
+    ``--keyring-provider`` are how a notebook logs in to a company's index.
+    """
     return any(
         not any(start <= m.start() < end for start, end in understood)
         for m in _INDEX_SETTING.finditer(text)
@@ -440,8 +445,8 @@ def scan_notebook(text: str, rel: str, want_imports: bool = False) -> Dependency
         # Without a pip line, the cell needn't be parsed.
         if want_imports or "pip" in cell.text:
             view = view_cell(cell.text, want_imports)
-            for install, ignored, span in _installs(cell, view):
-                understood.append(span)
+            for install, ignored in _installs(cell, view):
+                understood += install.source_options
                 found.private_index = found.private_index or install.private_index
                 links = links or install.links
                 for name, word, sourced in install.packages:
