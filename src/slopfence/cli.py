@@ -23,6 +23,7 @@ from slopfence.config import (
 )
 from slopfence.engine import Result, run
 from slopfence.indexes import find_private_index
+from slopfence.files import replace_text
 from slopfence.models import NEW_PACKAGE_DAYS, RULES, Severity, plural
 from slopfence.registry import OfflineRegistry, PyPIRegistry
 
@@ -272,6 +273,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     _use_utf8_output()
     parser = build_parser()
     args = parser.parse_args(argv)
+def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """Everything a run does once its options are read.
+
+    ``main`` wraps this, so a Ctrl-C anywhere in it -- while the config is read,
+    while `git diff` runs for --diff, while the environment is searched for a
+    private index, during the scan, or while the cache, baseline or report is
+    written -- ends like an interrupted program instead of a traceback. The
+    files on disk are safe: the cache, the baseline and the report are each
+    written in one step, so an interrupt leaves the previous file as it was.
+    """
     if args.write_baseline is not None and args.diff:
         parser.error("--write-baseline records every finding, so it can't be used with --diff")
     if args.write_baseline is not None and args.baseline is not None:
@@ -341,31 +352,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     now = time.time()
     registry = OfflineRegistry() if args.offline else PyPIRegistry(now=now)
     private_index = find_private_index(root) if detect_private_index and not args.offline else None
-    try:
-        result = run(
-            args.paths,
-            root,
-            registry,
-            select=select,
-            ignore=ignore,
-            changed=changed,
-            exclude=exclude,
-            known_packages=known_packages,
-            check_imports=check_imports,
-            private_index=private_index,
-            jobs=jobs,
-            per_file_ignores=config.per_file_ignores,
-            severity=config.severity,
-            baseline=baseline,
-            inherit_index=detect_private_index,
-            min_package_age=min_package_age,
-            now=now,
-        )
-    except KeyboardInterrupt:
-        # No report and no cache file: the run did not finish.
-        print("slopfence: interrupted", file=sys.stderr)
-        _end_like_an_interrupted_program()
-        return EXIT_INTERRUPTED
+    result = run(
+        args.paths,
+        root,
+        registry,
+        select=select,
+        ignore=ignore,
+        changed=changed,
+        exclude=exclude,
+        known_packages=known_packages,
+        check_imports=check_imports,
+        private_index=private_index,
+        jobs=jobs,
+        per_file_ignores=config.per_file_ignores,
+        severity=config.severity,
+        baseline=baseline,
+        inherit_index=detect_private_index,
+        min_package_age=min_package_age,
+        now=now,
+    )
     if isinstance(registry, PyPIRegistry):
         registry.save()
 
@@ -389,7 +394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = reporters.text(result, color=color, strict=strict)
 
     if args.output:
-        args.output.write_text(report + "\n", encoding="utf-8")
+        replace_text(args.output, report + "\n")
     else:
         print(report)
 
@@ -400,3 +405,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     if any(f.severity.rank >= fail_on.rank for f in result.findings):
         return EXIT_FINDINGS
     return EXIT_OK
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run slopfence from the command line and return the exit code.
+
+    0 ok, 1 issues, 2 error, 130 stopped with Ctrl-C.
+    """
+    _use_utf8_output()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return _run(args, parser)
+    except KeyboardInterrupt:
+        # No report, cache, or baseline write happens after this point: the run
+        # did not finish. SIGTERM deliberately keeps the OS default instead: a
+        # cancelled CI job or `timeout` means "stop now", not "finish the
+        # report"; the cost is the resource-tracker lines multiprocessing can
+        # print as the workers end on their own. If that verdict changes, a
+        # SIGTERM handler that raises KeyboardInterrupt lands here too.
+        print("slopfence: interrupted", file=sys.stderr)
+        _end_like_an_interrupted_program()
+        return EXIT_INTERRUPTED

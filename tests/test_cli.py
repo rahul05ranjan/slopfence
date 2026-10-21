@@ -1,7 +1,9 @@
 import json
+from unittest import mock
 
 import pytest
 
+from slopfence import cli as climod
 from slopfence import diff as diffmod
 from slopfence.cli import main
 from tests.conftest import git as _git
@@ -189,3 +191,48 @@ def test_non_utf8_stdout_does_not_crash(tmp_path, monkeypatch):
     assert main([str(tmp_path), "--offline", "--no-color"]) == 1
     sys.stdout.flush()
     assert "I hope this helps! \u2705 caf\u00e9" in raw.getvalue().decode("utf-8")
+
+
+def _survive_the_sigint_re_raise(monkeypatch):
+    """The real handler raises SIGINT at this process; tests must stay alive."""
+    monkeypatch.setattr(climod, "_end_like_an_interrupted_program", lambda: None)
+
+
+def test_ctrl_c_while_the_config_is_read_exits_130(tmp_path, capsys, monkeypatch):
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    _survive_the_sigint_re_raise(monkeypatch)
+    monkeypatch.setattr(climod, "load_config", mock.Mock(side_effect=KeyboardInterrupt))
+    assert main([str(tmp_path), "--offline"]) == climod.EXIT_INTERRUPTED
+    assert "slopfence: interrupted" in capsys.readouterr().err
+
+
+def test_ctrl_c_while_the_diff_runs_exits_130(tmp_path, capsys, monkeypatch):
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    _survive_the_sigint_re_raise(monkeypatch)
+    monkeypatch.setattr(
+        climod.diffmod, "changed_lines", mock.Mock(side_effect=KeyboardInterrupt)
+    )
+    assert main([str(tmp_path), "--offline", "--diff", "HEAD"]) == climod.EXIT_INTERRUPTED
+    assert "slopfence: interrupted" in capsys.readouterr().err
+
+
+def test_ctrl_c_during_the_scan_still_exits_130(tmp_path, capsys, monkeypatch):
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    _survive_the_sigint_re_raise(monkeypatch)
+    monkeypatch.setattr(climod, "run", mock.Mock(side_effect=KeyboardInterrupt))
+    assert main([str(tmp_path), "--offline"]) == climod.EXIT_INTERRUPTED
+    assert "slopfence: interrupted" in capsys.readouterr().err
+
+
+def test_ctrl_c_while_the_report_is_written_exits_130_and_leaves_no_file(
+    tmp_path, capsys, monkeypatch
+):
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    _survive_the_sigint_re_raise(monkeypatch)
+    report = tmp_path / "report.json"
+    monkeypatch.setattr(climod, "replace_text", mock.Mock(side_effect=KeyboardInterrupt))
+    assert main([str(tmp_path), "--offline", "--format", "json", "-o", str(report)]) == (
+        climod.EXIT_INTERRUPTED
+    )
+    assert not report.exists()
+    assert "slopfence: interrupted" in capsys.readouterr().err
