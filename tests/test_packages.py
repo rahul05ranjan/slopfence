@@ -426,3 +426,23 @@ def test_toml_comments():
 
     text = 'a = "x # no"  # yes\nb = \'# no\'\nc = """\n# no\n"""  # end\n# top'
     assert toml_comments(text) == ["# yes", "", "", "", "# end", "# top"]
+
+
+def test_pyproject_build_system_requires_skipped_in_test_folder(write, check):
+    """A pyproject.toml under a test folder keeps [project] lists but skips
+    [build-system] requires, so fixture build backends are not flagged."""
+    write(
+        "tests/fixture/pyproject.toml",
+        """
+        [build-system]
+        requires = ["setuptools>=61", "ghost-build-zz>=1"]
+
+        [project]
+        name = "demo"
+        dependencies = ["requests>=2"]
+        """,
+    )
+    registry = FakeRegistry({"requests"})
+    result = check("SLOP001", registry=registry)
+    assert result.findings == []
+    assert registry.queries == ["requests"]
