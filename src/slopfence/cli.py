@@ -22,8 +22,8 @@ from slopfence.config import (
     selected_rules,
 )
 from slopfence.engine import Result, run
-from slopfence.indexes import find_private_index
 from slopfence.files import replace_text
+from slopfence.indexes import find_private_index
 from slopfence.models import NEW_PACKAGE_DAYS, RULES, Severity, plural
 from slopfence.registry import OfflineRegistry, PyPIRegistry
 
@@ -265,14 +265,6 @@ def _record_baseline(path: Path, result: Result) -> None:
     result.baselined, result.findings = result.findings, []
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run slopfence from the command line and return the exit code.
-
-    0 ok, 1 issues, 2 error, 130 stopped with Ctrl-C.
-    """
-    _use_utf8_output()
-    parser = build_parser()
-    args = parser.parse_args(argv)
 def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     """Everything a run does once its options are read.
 
@@ -405,6 +397,7 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if any(f.severity.rank >= fail_on.rank for f in result.findings):
         return EXIT_FINDINGS
     return EXIT_OK
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run slopfence from the command line and return the exit code.
