@@ -22,7 +22,7 @@ from slopfence.config import (
     selected_rules,
 )
 from slopfence.engine import Result, run
-from slopfence.files import replace_text
+from slopfence.files import write_text
 from slopfence.indexes import find_private_index
 from slopfence.models import NEW_PACKAGE_DAYS, RULES, Severity, plural
 from slopfence.registry import OfflineRegistry, PyPIRegistry
@@ -386,7 +386,10 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         report = reporters.text(result, color=color, strict=strict)
 
     if args.output:
-        replace_text(args.output, report + "\n")
+        try:
+            write_text(args.output, report + "\n")
+        except OSError as err:
+            return _error(f"can't write report {args.output}: {err.strerror or err}")
     else:
         print(report)
 

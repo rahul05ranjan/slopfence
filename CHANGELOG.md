@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Ctrl-C now ends a run the same way everywhere, not only during the scan: also while the config is read, while `git diff` runs for `--diff`, while the environment is searched for a private index, and while the cache, the baseline or the report is written. It prints `slopfence: interrupted` and exits with `130`. The report file (`-o`) is now written in one step, like the cache and the baseline, so an interrupt leaves no half-written file behind ([#68](https://github.com/syedmuhdahmad/slopfence/issues/68)).
+- Ctrl-C now ends a run the same way everywhere, not only during the scan: also while the config is read, while `git diff` runs for `--diff`, while the environment is searched for a private index, and while the cache, the baseline or the report is written. It prints `slopfence: interrupted` and exits with `130`. The report file (`-o`) is now written in one step, like the cache and the baseline, so an interrupt leaves no half-written file behind. A symbolic link is written through instead of being replaced by a plain file, a device such as `/dev/null` is written in place, and a report that can't be written exits with `2` rather than `1`. Report files use `\n` line endings on Windows, as stdout and the cache already do ([#68](https://github.com/syedmuhdahmad/slopfence/issues/68)).
 
 ## [0.3.0] - 2026-10-14
 

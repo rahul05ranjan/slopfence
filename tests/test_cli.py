@@ -1,10 +1,13 @@
 import json
+import os
+import stat
 from unittest import mock
 
 import pytest
 
 from slopfence import cli as climod
 from slopfence import diff as diffmod
+from slopfence import files as filesmod
 from slopfence.cli import main
 from tests.conftest import git as _git
 from tests.conftest import git_init
@@ -233,9 +236,44 @@ def test_ctrl_c_while_the_report_is_written_exits_130_and_keeps_the_old_file(
     _survive_the_sigint_re_raise(monkeypatch)
     report = tmp_path / "report.json"
     report.write_text('{"old": true}')
-    monkeypatch.setattr(climod, "replace_text", mock.Mock(side_effect=KeyboardInterrupt))
+    # The rename is the last step of the one-step write, so interrupting it is the
+    # moment the old file has to survive.
+    monkeypatch.setattr(filesmod.os, "replace", mock.Mock(side_effect=KeyboardInterrupt))
     assert main([str(tmp_path), "--offline", "--format", "json", "-o", str(report)]) == (
         climod.EXIT_INTERRUPTED
     )
     assert report.read_text() == '{"old": true}'
+    assert not list(tmp_path.glob("*.tmp")), "the temporary file is cleaned up"
     assert "slopfence: interrupted" in capsys.readouterr().err
+
+
+def test_report_to_a_device_is_written_in_place(tmp_path):
+    """`-o` on a device such as /dev/null writes through it instead of renaming onto it (#68)."""
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    assert main([str(tmp_path), "--offline", "-o", os.devnull]) == climod.EXIT_OK
+    if os.name != "nt":
+        assert stat.S_ISCHR(os.stat(os.devnull).st_mode), "/dev/null is still the null device"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="making a symlink needs a privilege on Windows")
+def test_report_through_a_symlink_updates_the_real_file(tmp_path):
+    """`-o` on a symbolic link writes the file it names and leaves the link a link (#68)."""
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    real = tmp_path / "real.json"
+    real.write_text("{}")
+    link = tmp_path / "report.json"
+    link.symlink_to(real)
+
+    assert main([str(tmp_path), "--offline", "--format", "json", "-o", str(link)]) == climod.EXIT_OK
+    assert link.is_symlink(), "the link is not replaced by a plain file"
+    assert real.read_text() != "{}", "the file the link names was written"
+
+
+def test_unwritable_report_target_exits_2(tmp_path, capsys):
+    """A report that can't be written is an error (exit 2), not a findings result (#68)."""
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    target = tmp_path / "a-folder"
+    target.mkdir()
+
+    assert main([str(tmp_path), "--offline", "-o", str(target)]) == climod.EXIT_ERROR
+    assert "can't write report" in capsys.readouterr().err
