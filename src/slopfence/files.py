@@ -26,9 +26,12 @@ def replace_text(path: Path, text: str, mode: int | None = None) -> None:
     """
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
-        _write(tmp, text)
         if mode is not None:
+            # Permissions first, text second: a file that only its owner may read is
+            # never readable by others, not even while it is written.
+            tmp.touch()
             os.chmod(tmp, mode)
+        _write(tmp, text)
         os.replace(tmp, path)
     finally:
         # Gone already when the write worked. Left behind when it failed.
