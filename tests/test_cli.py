@@ -277,3 +277,65 @@ def test_unwritable_report_target_exits_2(tmp_path, capsys):
 
     assert main([str(tmp_path), "--offline", "-o", str(target)]) == climod.EXIT_ERROR
     assert "can't write report" in capsys.readouterr().err
+
+
+# Root may write anywhere, so the permission tests below would prove nothing.
+_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/fd"), reason="no /dev/fd on this platform")
+def test_report_to_a_pipe_is_written_in_place(tmp_path):
+    """`-o /dev/stdout | cmd` and `-o >(cmd)` name a pipe through /dev/fd: the report goes in."""
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    read_end, write_end = os.pipe()
+    try:
+        args = [str(tmp_path), "--offline", "--format", "json", "-o", f"/dev/fd/{write_end}"]
+        assert main(args) == climod.EXIT_OK
+    finally:
+        os.close(write_end)
+    with os.fdopen(read_end, encoding="utf-8") as stream:
+        assert "version" in json.loads(stream.read())
+
+
+@pytest.mark.skipif(os.name == "nt" or _ROOT, reason="needs POSIX folder permissions, not root")
+def test_report_in_a_read_only_folder_is_still_written(tmp_path):
+    """An existing report in a folder the user can't write to is updated in place, as in 0.3."""
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    folder = tmp_path / "reports"
+    folder.mkdir()
+    report = folder / "report.json"
+    report.write_text("{}")
+    folder.chmod(0o555)
+    try:
+        args = [str(tmp_path), "--offline", "--format", "json", "-o", str(report)]
+        assert main(args) == climod.EXIT_OK
+    finally:
+        folder.chmod(0o755)  # the temporary folder has to be removable
+    assert "version" in json.loads(report.read_text())
+
+
+@pytest.mark.skipif(_ROOT, reason="root may write to any file")
+def test_read_only_report_is_not_replaced(tmp_path, capsys):
+    """A report file the user made read-only keeps its content, and the run exits 2."""
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    report = tmp_path / "report.json"
+    report.write_text("{}")
+    report.chmod(stat.S_IREAD)
+    try:
+        assert main([str(tmp_path), "--offline", "-o", str(report)]) == climod.EXIT_ERROR
+        assert report.read_text() == "{}"
+    finally:
+        report.chmod(stat.S_IREAD | stat.S_IWRITE)
+    assert "can't write report" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows files have no POSIX permissions")
+def test_replaced_report_keeps_its_permissions(tmp_path):
+    """A report that only its owner may read stays that way when a run replaces it."""
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    report = tmp_path / "report.json"
+    report.write_text("{}")
+    report.chmod(0o600)
+    assert main([str(tmp_path), "--offline", "--format", "json", "-o", str(report)]) == 0
+    assert "version" in json.loads(report.read_text())
+    assert stat.S_IMODE(report.stat().st_mode) == 0o600

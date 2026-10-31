@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Ctrl-C now ends a run the same way everywhere, not only during the scan: also while the config is read, while `git diff` runs for `--diff`, while the environment is searched for a private index, and while the cache, the baseline or the report is written. It prints `slopfence: interrupted` and exits with `130`. The report file (`-o`) is now written in one step, like the cache and the baseline, so an interrupt leaves no half-written file behind. A symbolic link is written through instead of being replaced by a plain file, a device such as `/dev/null` is written in place, and a report that can't be written exits with `2` rather than `1`. Report files use `\n` line endings on Windows, as stdout and the cache already do ([#68](https://github.com/syedmuhdahmad/slopfence/issues/68)).
+- Ctrl-C now ends a run the same way at every point, not only during the scan: also while the config is read, while `git diff` runs for `--diff`, while the environment is searched for a private index, and while the cache, the baseline or the report is written. It prints `slopfence: interrupted` and exits with `130` ([#68](https://github.com/syedmuhdahmad/slopfence/issues/68)).
+- The report file (`-o`) is now replaced in one step, like the cache and the baseline, so a run that is stopped leaves the old report as it was. The report keeps its permissions, and so does a baseline that `--write-baseline` replaces. A report that can't be written now exits with `2` and a message, not with `1` and a traceback. A pipe or a device (`-o /dev/stdout`, `/dev/null`) and a report in a folder you can't write to are still written in place. On Windows, the report now has `\n` line endings, like the cache and the baseline ([#68](https://github.com/syedmuhdahmad/slopfence/issues/68)).
 
 ## [0.3.0] - 2026-10-14
 
