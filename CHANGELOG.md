@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `SLOP001`: an ignore comment on a `pyproject.toml` requirement written with TOML escapes, such as `"corp-lib; python_version<\"3.12\""`, now stops both the finding and the PyPI lookup. Before, the name was sent to pypi.org and reported on the line that opens the array. The same happened to an entry after one that holds an escaped `]`, and to an entry that a comment on the array's first line names. Each entry is now reported on its own line. A comment on the line that opens the array still covers the entries that v0.3 reported there ([#97](https://github.com/syedmuhdahmad/slopfence/issues/97))
+- In `pyproject.toml` and `Pipfile`, ignore comments after a multi-line string that holds `\"""`, or that has a quote just before its closing `"""`, are no longer missed. Such a string now ends where TOML ends it. A `# slopfence:` directive in its text no longer counts, as in any other string ([#97](https://github.com/syedmuhdahmad/slopfence/issues/97))
+
 ## [0.3.0] - 2026-10-14
 
 A new rule for packages that are new on PyPI, a baseline for the findings you already have, more dependency files, and worker processes for large projects.
